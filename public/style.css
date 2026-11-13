@@ -1,0 +1,32 @@
+html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    overflow: hidden;
+    background-color: #0f0f0f;
+}
+
+#app {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+}
+
+/* The canvas is sized in device pixels by display.ts; never let the browser smooth it. */
+#game-container canvas {
+    display: block;
+    image-rendering: pixelated;
+}
+
+/* Dungeon mood: darkened edges (toggled by Ui.setDark). */
+#vignette {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    background: radial-gradient(ellipse at center, transparent 40%, rgba(8, 4, 16, 0.78) 100%);
+    opacity: 0;
+    transition: opacity 0.4s ease;
+}
+#app.is-dark #vignette { opacity: 1; }
