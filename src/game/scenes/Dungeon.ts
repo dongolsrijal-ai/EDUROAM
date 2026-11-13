@@ -19,6 +19,8 @@ export const DUNGEON_MESSAGES = {
     guardianDefeated: 'Guardian defeated! Find the treasure chest.',
     treasureClaimed: 'Treasure claimed! The exit portal has appeared.',
     chestLocked: 'The Stone Guardian protects this chest. Defeat it first!',
+    rewardNotSaved: 'Your reward could not be saved (browser storage is full or blocked). Nothing was lost: press E to try again.',
+    rewardAlreadyCollected: 'You already collected this reward.',
 };
 
 /** First dungeon floor: template rooms, a guardian, loot chests and a locked exit. */
@@ -167,13 +169,16 @@ export class Dungeon extends WorldScene
                 const ui = getUi();
                 if (isFinal && !dungeonRun.state.guardianDefeated) return ui.toasts.show(DUNGEON_MESSAGES.chestLocked, 'error');
                 const firstOpen = !record();
-                const { record: chest, grantedQty } = dungeonRun.openChest(chestId, isFinal, () => rollLoot(DUNGEON_LOOT));
-                if (firstOpen) this.playChestOpen(image);
+                const result = dungeonRun.openChest(chestId, isFinal, () => rollLoot(DUNGEON_LOOT));
+                if (firstOpen && record()) this.playChestOpen(image); // no record = the roll was not saved
+                if (result.status === 'saveFailed') return ui.toasts.show(DUNGEON_MESSAGES.rewardNotSaved, 'error');
 
+                const { record: chest, grantedQty } = result;
                 const name = itemDef(chest.itemId).name;
                 if (grantedQty > 0) ui.toasts.show(`You found: ${name}${grantedQty > 1 ? ` ×${grantedQty}` : ''}`, 'reward', itemIconUrl(chest.itemId));
+                else if (chest.granted) ui.toasts.show(DUNGEON_MESSAGES.rewardAlreadyCollected); // delivered before an interrupted save
                 if (!chest.granted) ui.toasts.show(`Your bag is full! Make room, then press E to collect the ${name}.`, 'error');
-                if (isFinal && dungeonRun.state.exitUnlocked && grantedQty > 0) this.revealPortal(true);
+                if (isFinal && chest.granted && dungeonRun.state.exitUnlocked) this.revealPortal(true);
             },
         });
     }
