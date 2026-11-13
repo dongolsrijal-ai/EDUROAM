@@ -88,27 +88,40 @@ def require_ready(project: Path):
 
 
 def cline_run(project: Path, provider: str, prompt: str, log_file: Path, *, plan: bool, timeout_seconds: int) -> str:
+    """Run one Cline task without writing into a possibly closed stdin pipe.
+
+    A prompt file provides input through stdin, and a short positional prompt
+    keeps headless Cline invocation unambiguous. This avoids broken pipes when
+    Windows .cmd launchers exit before Python finishes writing the prompt.
+    """
+    prompt_file = log_file.with_suffix(".prompt.txt")
+    prompt_file.parent.mkdir(parents=True, exist_ok=True)
+    prompt_file.write_text(prompt, encoding="utf-8")
+    relative_prompt_path = prompt_file.relative_to(project).as_posix()
+    instruction = (
+        f"Follow the full instructions in {relative_prompt_path} (also supplied "
+        "on standard input). Return the requested final output format."
+    )
     command = ["cline", "--json", "--provider", provider, "--cwd", str(project),
                "--timeout", str(timeout_seconds)]
     if plan:
         command.append("--plan")
     else:
         command.extend(["--auto-approve", "true"])
+    command.append(instruction)
     print(f"\n[{provider} | {'PLAN / REVIEW' if plan else 'ACT'}]", flush=True)
-    with log_file.open("w", encoding="utf-8") as log:
-        process = subprocess.Popen(executable_command(command), cwd=str(project), stdin=subprocess.PIPE,
+    final = None
+    finish_reason = None
+    # Do not write to process.stdin. If Cline quits early due to missing login,
+    # Windows will not raise BrokenPipeError; we can read the CLI error instead.
+    with prompt_file.open("rb") as prompt_stream, log_file.open("w", encoding="utf-8") as log:
+        process = subprocess.Popen(executable_command(command), cwd=str(project), stdin=prompt_stream,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                    text=True, encoding="utf-8", errors="replace", bufsize=1)
-        assert process.stdin and process.stdout
-        process.stdin.write(prompt)
-        process.stdin.close()
-        final = None
-        finish_reason = None
-        lines = 0
+        assert process.stdout
         for line in process.stdout:
             log.write(line)
             log.flush()
-            lines += 1
             try:
                 message = json.loads(line)
             except json.JSONDecodeError:
@@ -123,11 +136,25 @@ def cline_run(project: Path, provider: str, prompt: str, log_file: Path, *, plan
                     final = event.get("text")
                 elif event.get("type") == "iteration_end":
                     print("  Agent step completed", flush=True)
+                elif event.get("type") == "error":
+                    print("  Agent error:", event.get("message", "Unknown"), flush=True)
             elif kind == "error":
                 print("  CLI error:", message.get("message", "Unknown"), flush=True)
-        rc = process.wait(timeout=30)
+        try:
+            rc = process.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            raise RuntimeError(f"Cline did not exit cleanly. Inspect {log_file}")
     if rc or not final or finish_reason == "aborted":
-        raise RuntimeError(f"Cline run failed, exit={rc}, finish={finish_reason}. Check {log_file}")
+        output = log_file.read_text(encoding="utf-8", errors="replace")[-3000:]
+        raise RuntimeError(
+            f"Cline run failed for {provider} (exit={rc}, finish={finish_reason}).\n"
+            f"CLI output tail:\n{output or '(no output)'}\n"
+            f"Full log: {log_file}\n"
+            "If the error mentions authentication, run `cline auth openai-codex` "
+            "and verify the Claude Code CLI login separately."
+        )
     print(f"  Finished. Log: {log_file}", flush=True)
     return str(final).strip()
 
