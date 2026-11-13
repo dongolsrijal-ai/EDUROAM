@@ -22,7 +22,22 @@ LOG_DIR = ".agent-loop"
 SECRET_PATH = re.compile(r"(^|/)(\.env($|\.)|.*\.(?:pem|key|p12|pfx)$|.*(?:secret|credential|private.?key).*)", re.I)
 
 
+def executable_command(command: list[str]) -> list[str]:
+    """Resolve Windows npm-installed .cmd launchers before subprocess starts.
+
+    PowerShell finds commands using PATHEXT, but Windows CreateProcess when
+    called from Python doesn't always resolve bare `npm` / `cline` to .cmd.
+    Providing the full path to npm.cmd/cline.cmd avoids WinError 2.
+    """
+    if os.name == "nt" and command:
+        resolved = shutil.which(command[0])
+        if resolved:
+            return [resolved, *command[1:]]
+    return command
+
+
 def call(command: list[str], cwd: Path, *, timeout: int = 180, checked: bool = True) -> subprocess.CompletedProcess:
+    command = executable_command(command)
     outcome = subprocess.run(command, cwd=str(cwd), text=True, encoding="utf-8", errors="replace",
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
     if checked and outcome.returncode:
@@ -63,7 +78,13 @@ def require_ready(project: Path):
         raise RuntimeError("Working tree has uncommitted changes. Commit your current project first so the agent has a safe checkpoint.\nUse: git add . && git commit -m 'Backup before agent loop'")
     if git(project, "diff", "--cached", "--name-only"):
         raise RuntimeError("Staged files exist. Commit them first.")
-    call(["cline", "--version"], project, timeout=30)
+    try:
+        call(["cline", "--version"], project, timeout=30)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "Windows failed to launch Cline. Check `where.exe cline` and `cline --version`; "
+            "npm-installed CLI commands normally use cline.cmd."
+        ) from exc
 
 
 def cline_run(project: Path, provider: str, prompt: str, log_file: Path, *, plan: bool, timeout_seconds: int) -> str:
@@ -75,7 +96,7 @@ def cline_run(project: Path, provider: str, prompt: str, log_file: Path, *, plan
         command.extend(["--auto-approve", "true"])
     print(f"\n[{provider} | {'PLAN / REVIEW' if plan else 'ACT'}]", flush=True)
     with log_file.open("w", encoding="utf-8") as log:
-        process = subprocess.Popen(command, cwd=str(project), stdin=subprocess.PIPE,
+        process = subprocess.Popen(executable_command(command), cwd=str(project), stdin=subprocess.PIPE,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                    text=True, encoding="utf-8", errors="replace", bufsize=1)
         assert process.stdin and process.stdout
@@ -264,6 +285,10 @@ def main():
     project = Path(args.project).expanduser().resolve()
     require_ready(project)
     print(f"Project: {project}\nCline: {call(['cline','--version'], project).stdout.strip()}")
+    if os.name == "nt":
+        print("Windows commands:")
+        for name in ("cline", "npm", "git"):
+            print(f"  {name}: {shutil.which(name) or 'not found'}")
     print("Plan/review provider: openai-codex; act provider: claude-code")
     if args.check:
         print("Preflight OK. Authentication and actual model responses not tested.")
