@@ -1,5 +1,7 @@
 # Educational Roguelite Hackathon: Master Plan
 
+The original eight gameplay milestones are implemented in the existing codebase. Do not rebuild them. Prioritize fixing verified issues from the code audit, starting with dungeon chest persistence and the full-inventory dungeon softlock. After these fixes, proceed to educational progression and AI integrations.
+
 ## Project
 
 Extend the existing Phaser + JavaScript + Vite pixel RPG in this repository.
