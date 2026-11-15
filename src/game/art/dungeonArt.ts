@@ -92,6 +92,27 @@ export function drawDungeonArt (scene: Scene)
         for (const [x, y] of [[6, 9], [24, 7], [27, 19], [8, 24], [17, 3], [15, 29]]) rect(ctx, x, y, 2, 2, '#e8dcff');
     });
 
+    // Staff bolt pointing right (rotated in flight): gold head, violet trail.
+    texture(scene, 'magic-bolt', 12, 5, (ctx) =>
+    {
+        rect(ctx, 0, 2, 4, 1, '#9b7bea');
+        rect(ctx, 3, 1, 4, 3, '#9b7bea');
+        rect(ctx, 6, 0, 5, 5, '#ffd25e');
+        rect(ctx, 7, 1, 4, 3, '#ffffff');
+        rect(ctx, 11, 2, 1, 1, '#ffd25e');
+    });
+
+    // The player's staff, pointing up (raised briefly when casting).
+    texture(scene, 'staff', 7, 20, (ctx) =>
+    {
+        rect(ctx, 2, 6, 3, 14, '#96663f');
+        rect(ctx, 3, 6, 1, 14, '#c08a5b');
+        rect(ctx, 0, 4, 2, 3, '#e0a93a'); rect(ctx, 5, 4, 2, 3, '#e0a93a');
+        rect(ctx, 1, 0, 5, 5, '#6f52c4');
+        rect(ctx, 2, 1, 3, 3, '#9b7bea');
+        rect(ctx, 2, 1, 1, 1, '#e6dcff');
+    });
+
     // Arrow pointing right (rotated in flight).
     texture(scene, 'arrow', 12, 5, (ctx) =>
     {

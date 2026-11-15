@@ -1,7 +1,8 @@
-import StartGame from './game/main';
+import { startApp } from './game/app';
 
+// Sign-in first: the game starts only after Supabase confirms the account (see game/app.ts).
 document.addEventListener('DOMContentLoaded', () => {
 
-    StartGame('game-container');
+    void startApp('game-container');
 
 });

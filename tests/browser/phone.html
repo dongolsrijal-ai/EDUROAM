@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8"><title>EDUROAM auth test (phone size)</title></head>
+<body style="margin:0">
+<!-- 390x844 = a typical phone viewport; headless browsers won't size windows that small. -->
+<iframe id="phone" width="390" height="844" style="border:0"></iframe>
+<pre id="auth-result">RUNNING</pre>
+<script>
+const out = document.getElementById('auth-result');
+document.getElementById('phone').src = `/tests/browser/auth.html?phase=${new URLSearchParams(location.search).get('phase') || 'limit'}`;
+setInterval(() => {
+    const inner = document.getElementById('phone').contentDocument?.getElementById('auth-result')?.textContent;
+    if (inner) out.textContent = inner;
+}, 100);
+</script>
+</body></html>

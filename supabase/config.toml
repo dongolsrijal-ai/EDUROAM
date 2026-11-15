@@ -1,0 +1,65 @@
+# Supabase CLI configuration for EDUROAM, used for LOCAL development (`supabase start`) and
+# per-function settings on deploy. Do not `supabase config push` it to the hosted project:
+# the [auth] values below are local defaults. See docs/ai-tutoring-backend.md.
+project_id = "eduroam"
+
+[auth]
+# The game runs on the Vite dev server (port 8080) during development.
+site_url = "http://localhost:8080"
+additional_redirect_urls = ["http://localhost:8080", "http://127.0.0.1:8080"]
+enable_anonymous_sign_ins = true
+
+# Email codes: the game asks for a 6-digit code, so every template shows {{ .Token }}.
+# Hosted project: paste the same templates in the dashboard (BACKEND_HANDOFF.md,
+# "Email codes + password reset"); this file is not pushed.
+[auth.email]
+enable_confirmations = true
+otp_length = 6
+otp_expiry = 3600
+max_frequency = "60s"
+
+[auth.email.template.magic_link]
+subject = "Your EDUROAM sign-in code"
+content_path = "./supabase/templates/magic_link.html"
+
+[auth.email.template.confirmation]
+subject = "Confirm your EDUROAM account"
+content_path = "./supabase/templates/confirmation.html"
+
+[auth.email.template.recovery]
+subject = "Reset your EDUROAM password"
+content_path = "./supabase/templates/recovery.html"
+
+[auth.email.template.email_change]
+subject = "Confirm your EDUROAM email"
+content_path = "./supabase/templates/email_change.html"
+
+[storage]
+file_size_limit = "10MiB"
+
+# Both functions verify the caller's JWT themselves (supabase.auth.getUser), which also
+# works with the new publishable/secret API keys and asymmetric JWT signing keys.
+[functions.npc-chat]
+verify_jwt = false
+
+[functions.answer-dash]
+verify_jwt = false
+
+[functions.class-documents]
+verify_jwt = false
+
+# FaceTime Tutor. voice-session verifies the student's JWT itself (like npc-chat);
+# voice-agent is called by the LiveKit agent with VOICE_AGENT_SECRET, not a user JWT.
+[functions.voice-session]
+verify_jwt = false
+
+[functions.voice-agent]
+verify_jwt = false
+
+# Chert FaceTime webhook: authenticated by the ?key= secret (CHERT_WEBHOOK_KEY), not a user JWT.
+[functions.chert-webhook]
+verify_jwt = false
+
+# Authenticated owner-only deletion with private Storage cleanup.
+[functions.npc-lifecycle]
+verify_jwt = false

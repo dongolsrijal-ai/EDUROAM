@@ -22,7 +22,6 @@ export const CHARACTER_SIZE = 24;
 export const PLAYER_SPEED = 80;
 
 /** Player health in combat areas (dungeons). */
-export const PLAYER_MAX_HP = 100;
 
 /** NPC ROAMING: walking speed (px/s) and how far (px) they wander from their home spot. */
 export const NPC_WALK_SPEED = 26;
@@ -110,4 +109,62 @@ export const COLORS = {
     glow: 'rgba(255, 180, 80, 0.22)',
     chest: '#8a5a2b',
     chestDark: '#5e3b1b',
+};
+
+/**
+ * GARDEN PALETTE for the village (Emory Hacks-inspired spring garden): pastel greens,
+ * cream highlights, peach / coral, soft pinks and soft brown outlines. Used by
+ * art/gardenArt.ts, art/buildings.ts and the ambient insects. The dungeon keeps COLORS.
+ */
+export const GARDEN = {
+    outline: '#5c4033',
+    outlineSoft: '#8a6a52',
+    shadow: 'rgba(70, 45, 30, 0.18)',
+    cream: '#fff6dc',
+    creamDark: '#f1e2bd',
+
+    grass: '#a3d67c',
+    grassLight: '#abdc83',
+    grassDark: '#9bd076',
+    grassDeep: '#74b45c',
+    clover: '#6fb35a',
+    cloverLight: '#92d06e',
+
+    dirt: '#e6bd8e',
+    dirtLight: '#f2d3a6',
+    dirtDark: '#cc9d6e',
+    pebble: '#dccbb2',
+    pebbleDark: '#b8a387',
+
+    water: '#93d2ea',
+    waterLight: '#c9edf8',
+    waterDark: '#72bcd8',
+    lily: '#7cc46a',
+    lilyDark: '#5aa652',
+
+    leaf: '#82c67b',
+    leafMid: '#67b26b',
+    leafDark: '#4f9a5c',
+    leafHi: '#b8e59c',
+    trunk: '#a8764f',
+    trunkDark: '#82573a',
+
+    pink: '#f7a8c4',
+    pinkLight: '#ffd3e2',
+    pinkDark: '#e2809f',
+    peach: '#ffc9a3',
+    coral: '#f28b6e',
+    coralDark: '#d66d52',
+    yellow: '#ffe189',
+    butter: '#fff2ad',
+    sky: '#9fd0ff',
+    skyDark: '#6fa6e8',
+    lavender: '#c9b3ff',
+
+    stone: '#d4c9bc',
+    stoneLight: '#e8e0d4',
+    stoneDark: '#aa9d8f',
+    moss: '#8cc46e',
+    wood: '#c08a5b',
+    woodDark: '#96663f',
 };

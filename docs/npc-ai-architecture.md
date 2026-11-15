@@ -1,8 +1,9 @@
 # NPC, AI memory and cross-platform messaging: architecture
 
-Status: **prepared, not connected**. The game runs fully locally today (scripted dialogue,
-`localStorage`). Gemini, Chert and Supabase plug in behind the seams described here without
-rebuilding the NPC system.
+Status: the scripted talk flow below is unchanged. **AI tutoring is now implemented with
+Supabase Edge Functions + Gemini** (not the FastAPI service sketched in sections 5-8): see
+[ai-tutoring-backend.md](ai-tutoring-backend.md) for the live schema, security model, setup
+and the FaceTime/LiveKit pairing design.
 
 ```
  Phaser game (in-game talk)            Chert (iMessage)

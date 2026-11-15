@@ -91,20 +91,29 @@ const SHAPES = {
 
 const ICONS: Record<ItemId, { rows: string[]; palette: Palette }> = {
     cloth_armor: { rows: SHAPES.tunic, palette: { o: C.outline, c: C.pathLight, C: C.path, b: C.trunkDark } },
-    wooden_sword: { rows: SHAPES.sword, palette: { o: C.outline, w: '#d9a86c', g: C.gold, h: C.trunkDark } },
-    training_bow: { rows: SHAPES.bow, palette: { o: C.outline, w: C.trunk, g: C.trunkDark, s: '#e9e1cf' } },
     small_health_potion: { rows: SHAPES.potion, palette: { o: C.outline, c: C.trunk, g: '#dff2fb', r: '#d94141', R: '#ff9b9b' } },
     number_crystal: { rows: SHAPES.crystal, palette: { o: C.outline, L: '#e6d6ff', p: '#a77bf0', P: '#7446c2' } },
-    iron_sword: { rows: SHAPES.sword, palette: { o: C.outline, w: '#dfe5ea', g: '#8a96a3', h: C.trunkDark } },
     reinforced_armor: { rows: SHAPES.tunic, palette: { o: C.outline, c: '#b4bec8', C: '#7c8792', b: C.gold } },
-    hunter_bow: { rows: SHAPES.bow, palette: { o: C.outline, w: '#5a3d22', g: '#2f6b3a', s: '#f4ecd8' } },
     large_health_potion: { rows: SHAPES.potion, palette: { o: C.outline, c: C.gold, g: '#dff2fb', r: '#c2185b', R: '#f48fb1' } },
     magic_crystal: { rows: SHAPES.crystal, palette: { o: C.outline, L: '#e0fbff', p: '#4fc3f7', P: '#1e88e5' } },
+    warden_plate: { rows: SHAPES.tunic, palette: { o: C.outline, c: '#8a93b8', C: '#5a6290', b: '#ffd34d' } },
 };
+
+/** The permanent weapons' sprites (Phaser textures 'weapon-sword' / 'weapon-bow', drawn when attacking). */
+const WEAPON_ICONS = {
+    sword: { rows: SHAPES.sword, palette: { o: C.outline, w: '#dfe5ea', g: C.gold, h: C.trunkDark } },
+    bow: { rows: SHAPES.bow, palette: { o: C.outline, w: C.trunk, g: C.trunkDark, s: '#e9e1cf' } },
+};
+
+export function weaponIconCanvas (id: keyof typeof WEAPON_ICONS): HTMLCanvasElement
+{
+    const { rows, palette } = WEAPON_ICONS[id];
+    return drawCanvas(16, 16, (ctx) => ascii(ctx, rows, palette));
+}
 
 const cache = new Map<ItemId, string>();
 
-/** 16x16 canvas of an item icon (also registered as Phaser texture `item-<id>` for held weapons). */
+/** 16x16 canvas of an item icon (also registered as Phaser texture `item-<id>`). */
 export function itemIconCanvas (id: ItemId): HTMLCanvasElement
 {
     const { rows, palette } = ICONS[id];

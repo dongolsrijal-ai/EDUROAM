@@ -1,14 +1,17 @@
-// Turns a DungeonPlan into one tile grid + a list of markers (props, spawns, future slots).
+// Turns a DungeonPlan into one tile grid + markers (props, spawns, enemy slots) + per-room info
+// (bounds, role, own door cells) used for room locking. No Phaser, so tests can run it.
 
-import { DUNGEON } from '../../art/textures';
 import { seededRandom } from '../../random';
-import type { DungeonPlan } from './layout';
-import { ROOM_H, ROOM_TEMPLATES, ROOM_W } from './rooms';
+import type { DungeonPlan, PlanRoom } from './generate';
+import { renderRoom, ROOM_SPECS, type RoomRole } from './rooms';
+import { DUNGEON } from './tiles';
 
-/** Width of carved doorways in tiles. */
+/** Width of carved doorways (and corridors) in tiles. */
 const DOOR_SIZE = 3;
 
-export type MarkerType = 'torch' | 'pillar' | 'chest' | 'finalChest' | 'guardian' | 'portal' | 'stairs' | 'spawn' | 'monster' | 'npc' | 'door';
+export type MarkerType =
+    | 'torch' | 'pillar' | 'obstacle' | 'decor' | 'chest' | 'finalChest' | 'guardian' | 'portal'
+    | 'stairs' | 'spawn' | 'enemySlot' | 'shrine' | 'door';
 
 export interface Marker
 {
@@ -19,57 +22,88 @@ export interface Marker
     roomId: string;
 }
 
+export interface BuiltRoom
+{
+    id: string;
+    role: RoomRole;
+    /** Tile rect of the whole room including its walls. */
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    /** Carved doorway cells that belong to this room's walls (where gates close). */
+    doors: { x: number; y: number }[];
+}
+
 const LEGEND: Record<string, { wall: boolean; marker?: MarkerType }> = {
     '#': { wall: true },
     'T': { wall: true, marker: 'torch' },
     '.': { wall: false },
     'P': { wall: false, marker: 'pillar' },
+    'O': { wall: false, marker: 'obstacle' },
+    'd': { wall: false, marker: 'decor' },
     'C': { wall: false, marker: 'chest' },
     'F': { wall: false, marker: 'finalChest' },
     'G': { wall: false, marker: 'guardian' },
     'X': { wall: false, marker: 'portal' },
     'S': { wall: false, marker: 'stairs' },
     '@': { wall: false, marker: 'spawn' },
-    'M': { wall: false, marker: 'monster' },
-    'N': { wall: false, marker: 'npc' },
+    'E': { wall: false, marker: 'enemySlot' },
+    'H': { wall: false, marker: 'shrine' },
 };
+
+/** Markers whose tile is blocked by a solid object (tests use this for reachability). */
+export const SOLID_MARKERS: MarkerType[] = ['pillar', 'obstacle', 'chest', 'finalChest', 'stairs', 'shrine'];
+
+/** Which side of `a` the room `b` is on (rooms of a link always face each other). */
+function side (a: PlanRoom, b: PlanRoom): 'east' | 'west' | 'south' | 'north'
+{
+    if (a.x + a.w <= b.x) return 'east';
+    if (b.x + b.w <= a.x) return 'west';
+    if (a.y + a.h <= b.y) return 'south';
+    return 'north';
+}
 
 export function buildDungeon (plan: DungeonPlan, seed = 7)
 {
     const rand = seededRandom(seed);
-    const floorTile = () => (rand() < 0.12 ? DUNGEON.FLOOR_CRACK : DUNGEON.FLOOR);
+    // Detail tiles (bones / moss) stay sparse: rooms are larger now, and fights must stay readable.
+    const floorTile = () => { const r = rand(); return r < 0.025 ? DUNGEON.FLOOR_DETAIL : r < 0.15 ? DUNGEON.FLOOR_ALT : DUNGEON.FLOOR; };
 
-    const cols = (Math.max(...plan.rooms.map((r) => r.gx)) + 1) * ROOM_W;
-    const rows = (Math.max(...plan.rooms.map((r) => r.gy)) + 1) * ROOM_H;
+    const cols = Math.max(...plan.rooms.map((r) => r.x + r.w)) + 1;
+    const rows = Math.max(...plan.rooms.map((r) => r.y + r.h)) + 1;
     const grid: number[][] = Array.from({ length: rows }, () => Array<number>(cols).fill(DUNGEON.VOID));
     let markers: Marker[] = [];
+    const rooms = new Map<string, BuiltRoom>();
 
     for (const room of plan.rooms)
     {
-        const template = ROOM_TEMPLATES[room.template];
-        const ox = room.gx * ROOM_W;
-        const oy = room.gy * ROOM_H;
-        if (template.length !== ROOM_H || template.some((row) => row.length !== ROOM_W))
-        {
-            throw new Error(`Room template "${room.template}" must be ${ROOM_W}x${ROOM_H}`);
-        }
+        const spec = ROOM_SPECS[room.template];
+        if (spec.w !== room.w || spec.h !== room.h) throw new Error(`Room ${room.id} size does not match template "${room.template}"`);
+        const template = renderRoom(room.template, rand);
+        rooms.set(room.id, { id: room.id, role: room.role, x: room.x, y: room.y, w: room.w, h: room.h, doors: [] });
 
         template.forEach((row, y) => [...row].forEach((ch, x) =>
         {
             const cell = LEGEND[ch];
             if (!cell) throw new Error(`Unknown room character "${ch}" in "${room.template}"`);
-            grid[oy + y][ox + x] = cell.wall ? DUNGEON.WALL : floorTile();
-            if (cell.marker) markers.push({ type: cell.marker, x: ox + x, y: oy + y, roomId: room.id });
+            grid[room.y + y][room.x + x] = cell.wall ? DUNGEON.WALL : (ch === '.' ? floorTile() : DUNGEON.FLOOR);
+            if (cell.marker) markers.push({ type: cell.marker, x: room.x + x, y: room.y + y, roomId: room.id });
         }));
     }
 
-    // Carve a doorway through both facing walls of every linked pair.
+    // Doorways through both facing walls + a walled corridor between them.
     const byId = new Map(plan.rooms.map((r) => [r.id, r]));
-    const carve = (x: number, y: number, roomId: string) =>
+    const door = (x: number, y: number, roomId: string) =>
     {
-        grid[y][x] = floorTile();
+        grid[y][x] = DUNGEON.FLOOR;
         markers = markers.filter((m) => !(m.x === x && m.y === y && m.type === 'torch'));
         markers.push({ type: 'door', x, y, roomId });
+        rooms.get(roomId)!.doors.push({ x, y });
+    };
+    const corridor = (x: number, y: number, wall: boolean) =>
+    {
+        if (grid[y][x] === DUNGEON.VOID || !wall) grid[y][x] = wall ? DUNGEON.WALL : DUNGEON.FLOOR;
     };
     const half = Math.floor(DOOR_SIZE / 2);
 
@@ -78,26 +112,36 @@ export function buildDungeon (plan: DungeonPlan, seed = 7)
         const a = byId.get(aId);
         const b = byId.get(bId);
         if (!a || !b) throw new Error(`Link ${aId} -> ${bId} names an unknown room`);
-        const dx = b.gx - a.gx;
-        const dy = b.gy - a.gy;
-
-        if (Math.abs(dx) + Math.abs(dy) !== 1) throw new Error(`Rooms ${aId} and ${bId} are not neighbours`);
-
-        if (dx !== 0)
+        const dir = side(a, b);
+        if (dir === 'east' || dir === 'west')
         {
-            const left = dx > 0 ? a : b;
-            const wallX = (left.gx + 1) * ROOM_W - 1;
-            const midY = left.gy * ROOM_H + Math.floor(ROOM_H / 2);
-            for (let y = midY - half; y <= midY + half; y++) { carve(wallX, y, aId); carve(wallX + 1, y, bId); }
+            const [left, right] = dir === 'east' ? [a, b] : [b, a];
+            const midY = left.y + (left.h - 1) / 2;
+            if (midY !== right.y + (right.h - 1) / 2) throw new Error(`Rooms ${aId} and ${bId} are not aligned`);
+            for (let y = midY - half; y <= midY + half; y++) { door(left.x + left.w - 1, y, left.id); door(right.x, y, right.id); }
+            for (let x = left.x + left.w; x < right.x; x++)
+            {
+                for (let y = midY - half; y <= midY + half; y++) corridor(x, y, false);
+                corridor(x, midY - half - 1, true);
+                corridor(x, midY + half + 1, true);
+            }
         }
         else
         {
-            const top = dy > 0 ? a : b;
-            const wallY = (top.gy + 1) * ROOM_H - 1;
-            const midX = top.gx * ROOM_W + Math.floor(ROOM_W / 2);
-            for (let x = midX - half; x <= midX + half; x++) { carve(x, wallY, aId); carve(x, wallY + 1, bId); }
+            const [top, bottom] = dir === 'south' ? [a, b] : [b, a];
+            const midX = top.x + (top.w - 1) / 2;
+            if (midX !== bottom.x + (bottom.w - 1) / 2) throw new Error(`Rooms ${aId} and ${bId} are not aligned`);
+            for (let x = midX - half; x <= midX + half; x++) { door(x, top.y + top.h - 1, top.id); door(x, bottom.y, bottom.id); }
+            for (let y = top.y + top.h; y < bottom.y; y++)
+            {
+                for (let x = midX - half; x <= midX + half; x++) corridor(x, y, false);
+                corridor(midX - half - 1, y, true);
+                corridor(midX + half + 1, y, true);
+            }
         }
     }
 
-    return { cols, rows, grid, markers };
+    return { cols, rows, grid, markers, rooms: [...rooms.values()] };
 }
+
+export type BuiltDungeon = ReturnType<typeof buildDungeon>;

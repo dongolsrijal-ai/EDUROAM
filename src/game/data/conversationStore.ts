@@ -6,9 +6,10 @@
 // Only services/npcService.ts should use this module; swapping to Supabase replaces it.
 
 import type { ConversationMessage, ConversationSource, LearningRecord, NpcMemory } from '../services/contracts';
-import { backupText, readText, writeJson } from './storage';
+import { backupText, readText, scopedKey, writeJson } from './storage';
 
-const STORAGE_KEY = 'eduroam.conversations';
+/** This account's own copy (see data/storage.ts ACCOUNT_SCOPED_KEYS). */
+const STORAGE_KEY = scopedKey('eduroam.conversations');
 const SCHEMA_VERSION = 1;
 /** Local history kept per player + NPC (the backend keeps everything). */
 const MAX_MESSAGES_PER_THREAD = 100;

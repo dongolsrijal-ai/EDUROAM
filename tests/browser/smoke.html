@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8"><title>EDUROAM browser regression</title>
+<link rel="stylesheet" href="/style.css"></head><body>
+<div id="app"><div id="game-container"></div><div id="ui"></div></div>
+<pre id="smoke-result">RUNNING</pre>
+<script>
+window.smokeErrors = [];
+window.addEventListener('error', (e) => { window.smokeErrors.push(e.error?.stack || e.message); document.getElementById('smoke-result').textContent = 'FAIL: ' + window.smokeErrors.join('\n'); });
+window.addEventListener('unhandledrejection', (e) => { window.smokeErrors.push(e.reason?.stack || String(e.reason)); document.getElementById('smoke-result').textContent = 'FAIL: ' + window.smokeErrors.join('\n'); });
+</script>
+<script type="module" src="/tests/browser/smoke.ts"></script>
+</body></html>

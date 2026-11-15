@@ -25,7 +25,7 @@ html, body {
     inset: 0;
     z-index: 1;
     pointer-events: none;
-    background: radial-gradient(ellipse at center, transparent 40%, rgba(8, 4, 16, 0.78) 100%);
+    background: radial-gradient(ellipse at center, transparent 40%, var(--dungeon-vignette, rgba(8, 4, 16, 0.78)) 100%);
     opacity: 0;
     transition: opacity 0.4s ease;
 }

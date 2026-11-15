@@ -56,3 +56,12 @@ export function getPlayerIdentity (): Readonly<PlayerIdentity>
 }
 
 export const currentPlayerId = () => getPlayerIdentity().playerId;
+
+/** Records the Supabase account this browser's local player is linked to (local progress is kept). */
+export function linkAuthUser (authUserId: string)
+{
+    const current = getPlayerIdentity();
+    if (current.authUserId === authUserId) return;
+    identity = { ...current, authUserId };
+    writeJson(STORAGE_KEY, identity);
+}

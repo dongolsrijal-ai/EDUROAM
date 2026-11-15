@@ -92,6 +92,12 @@ export class Player extends Physics.Arcade.Sprite
         if (!this.anims.isPlaying) this.setFrame(ANIM[this.facing].row * 2);
     }
 
+    /** Direction the player faces (last movement direction), in radians: right 0, down PI/2, left PI, up -PI/2. */
+    get facingAngle ()
+    {
+        return { right: 0, down: Math.PI / 2, left: Math.PI, up: -Math.PI / 2 }[this.facing];
+    }
+
     /** Body centre in world pixels (the sprite origin is its centre; feet are lower). */
     get center ()
     {

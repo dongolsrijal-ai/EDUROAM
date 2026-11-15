@@ -1,4 +1,5 @@
-// Small overlay widgets: HUD (location, crystals, dungeon health + objective), toasts,
+// Small overlay widgets: HUD (location, crystals, level, dungeon health + arrows / mana +
+// objective), toasts,
 // floating combat text, the interaction tag and the death screen.
 
 import { onPlayerStateChange, player } from '../state/playerState';
@@ -14,6 +15,11 @@ export class Hud
     private health = el('div', 'health hidden', el('div', 'health__bar', this.healthLag, this.healthFill), this.healthText);
     private objective = el('div', 'objective hidden');
     private hints = el('div', 'move-hint chip');
+    private level = el('div', 'chip chip--level');
+    private arrows = new ResourceBar('ARROWS', 'resource--arrows');
+    private mana = new ResourceBar('MANA', 'resource--mana');
+    private resources = el('div', 'resources hidden', this.arrows.root, this.mana.root);
+    private row = el('div', 'hud__row', this.location, this.crystals, this.level);
 
     constructor (parent: HTMLElement)
     {
@@ -21,12 +27,19 @@ export class Hud
         this.health.setAttribute('role', 'meter');
         this.health.setAttribute('aria-label', 'Health');
         parent.append(
-            el('div', 'hud', el('div', 'hud__row', this.location, this.crystals), this.health, this.objective),
+            el('div', 'hud', this.row, this.health, this.resources, this.objective),
             this.hints,
         );
+        this.level.title = 'Level and unspent stat points (press I)';
         this.renderCrystals();
         this.setCombat(false);
         onPlayerStateChange(() => this.renderCrystals());
+    }
+
+    /** Extra chip in the top row (e.g. the Pomodoro timer). */
+    addChip (chip: HTMLElement)
+    {
+        this.row.append(chip);
     }
 
     setLocation (name: string)
@@ -38,10 +51,11 @@ export class Hud
     setCombat (combat: boolean)
     {
         this.health.classList.toggle('hidden', !combat);
+        this.resources.classList.toggle('hidden', !combat);
         if (!combat) this.setObjective(null);
         this.hints.replaceChildren(combat
-            ? keyHints([['WASD', 'move'], ['LMB', 'melee'], ['RMB', 'bow'], ['F', 'heal'], ['E', 'use'], ['I', 'bag']])
-            : keyHints([['WASD', 'move'], ['E', 'talk'], ['I', 'bag']]));
+            ? keyHints([['WASD', 'move/aim'], ['J', 'sword'], ['K', 'bow'], ['L', 'staff'], ['F', 'heal'], ['E', 'use'], ['I', 'stats']])
+            : keyHints([['WASD', 'move'], ['E', 'talk'], ['I', 'bag & stats']]));
         // Restart the fade-out animation for the new hints.
         this.hints.classList.remove('move-hint');
         void this.hints.offsetWidth;
@@ -59,6 +73,13 @@ export class Hud
         this.health.classList.toggle('is-low', hp / max <= 0.3);
     }
 
+    /** Arrow + mana pools (bars + "ARROWS 6/8", "MANA 24/30"). */
+    setResources (r: { arrows: number; maxArrows: number; mana: number; maxMana: number })
+    {
+        this.arrows.set(r.arrows, r.maxArrows);
+        this.mana.set(r.mana, r.maxMana);
+    }
+
     setObjective (text: string | null)
     {
         this.objective.textContent = text ? `Objective: ${text}` : '';
@@ -68,6 +89,34 @@ export class Hud
     private renderCrystals ()
     {
         this.crystals.textContent = String(player.count('number_crystal'));
+        const { level, unspent } = player.progress;
+        this.level.textContent = unspent ? `Lv ${level} · ${unspent} pts` : `Lv ${level}`;
+        this.level.classList.toggle('has-points', unspent > 0);
+    }
+}
+
+/** A small labelled bar with a whole-number count, e.g. "ARROWS 6/8". */
+class ResourceBar
+{
+    readonly root: HTMLElement;
+    private fill = el('div', 'resource__fill');
+    private text = el('div', 'resource__text');
+
+    constructor (private label: string, modifier: string)
+    {
+        this.root = el('div', `resource ${modifier}`, el('div', 'resource__bar', this.fill), this.text);
+        this.root.setAttribute('role', 'meter');
+        this.root.setAttribute('aria-label', label);
+    }
+
+    set (value: number, max: number)
+    {
+        const whole = Math.floor(value);
+        this.fill.style.width = `${Math.max(0, Math.min(100, (value / max) * 100))}%`;
+        this.text.textContent = `${this.label} ${whole}/${max}`;
+        this.root.setAttribute('aria-valuenow', String(whole));
+        this.root.setAttribute('aria-valuemax', String(max));
+        this.root.classList.toggle('is-empty', whole === 0);
     }
 }
 
@@ -153,39 +202,98 @@ export class TalkTag
 export class DeathScreen implements Modal
 {
     private root: HTMLElement;
-    private onRetry: (() => void) | null = null;
+    private onRetry: (() => boolean | void) | null = null;
+    private onReturn: (() => boolean | void) | null = null;
 
     constructor (parent: HTMLElement)
     {
-        const retry = gameButton('btn btn--primary death__retry', () => this.retry(), 'Retry Dungeon');
+        const retry = gameButton('btn btn--primary death__retry', () => this.choose(this.onRetry), 'Retry Dungeon');
+        const leave = gameButton('btn death__return', () => this.choose(this.onReturn), 'Return to Village');
         this.root = el('div', 'death hidden',
             el('div', 'death__card',
                 el('h2', 'death__title', 'You Died'),
-                el('p', '', 'The dungeon claims another adventurer... for now. Your gear and earlier rewards are safe.'),
-                retry,
-                keyHints([['E', 'retry']])));
+                el('p', '', 'The dungeon claims another adventurer... for now. Your gear and earlier rewards are safe. The dungeon timer is paused.'),
+                el('div', 'death__actions', leave, retry),
+                keyHints([['E', 'retry'], ['V', 'village']])));
         this.root.setAttribute('role', 'alertdialog');
         this.root.setAttribute('aria-label', 'You died');
         parent.append(this.root);
     }
 
-    open (onRetry: () => void)
+    open (onRetry: () => boolean | void, onReturn?: () => boolean | void)
     {
         this.onRetry = onRetry;
+        this.onReturn = onReturn ?? null;
         this.root.classList.remove('hidden');
     }
 
     handleKey (key: string)
     {
-        if (isConfirm(key)) this.retry();
+        if (isConfirm(key)) this.choose(this.onRetry);
+        else if (key === 'v') this.choose(this.onReturn);
     }
 
-    private retry ()
+    private choose (action: (() => boolean | void) | null)
     {
-        if (!this.onRetry) return;
-        const done = this.onRetry;
+        if (!action) return;
+        if (action() === false) return;
+        this.close();
+    }
+
+    close ()
+    {
         this.onRetry = null;
+        this.onReturn = null;
         this.root.classList.add('hidden');
-        done();
+    }
+}
+
+/** Boss name + health bar (top centre) with an introduction banner. */
+export class BossBar
+{
+    private name = el('div', 'boss__name');
+    private fill = el('div', 'boss__fill');
+    private lag = el('div', 'boss__lag');
+    private root = el('div', 'boss hidden', this.name, el('div', 'boss__bar', this.lag, this.fill));
+    private banner = el('div', 'boss-intro hidden');
+
+    constructor (parent: HTMLElement)
+    {
+        this.root.setAttribute('role', 'meter');
+        parent.append(this.root, this.banner);
+    }
+
+    /** Big name card, then the bar appears. */
+    intro (title: string, subtitle: string, ms = 1800)
+    {
+        this.banner.replaceChildren(el('div', 'boss-intro__title', title), el('div', 'boss-intro__sub', subtitle));
+        this.banner.classList.remove('hidden');
+        window.setTimeout(() => this.banner.classList.add('hidden'), ms);
+    }
+
+    show (name: string)
+    {
+        this.name.textContent = name;
+        this.root.classList.remove('hidden', 'is-enraged');
+        this.root.setAttribute('aria-label', name);
+    }
+
+    setHp (hp: number, max: number)
+    {
+        const pct = `${Math.max(0, Math.min(100, (hp / max) * 100))}%`;
+        this.fill.style.width = pct;
+        this.lag.style.width = pct;
+        this.root.setAttribute('aria-valuenow', String(Math.ceil(hp)));
+    }
+
+    enrage ()
+    {
+        this.root.classList.add('is-enraged');
+    }
+
+    hide ()
+    {
+        this.root.classList.add('hidden');
+        this.banner.classList.add('hidden');
     }
 }

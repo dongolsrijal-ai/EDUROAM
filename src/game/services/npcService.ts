@@ -51,7 +51,8 @@ function scriptedLines (npc: NpcRecord, moment: DialogueMoment): string[]
     const reactions = { ...DEFAULT_REACTIONS, ...npc.reactions };
     switch (moment)
     {
-        case 'greeting': return npc.dialogue.length ? npc.dialogue : [`Hello! I'm ${npc.name}, and I teach ${npc.subject}.`];
+        // Teachers created without a custom greeting introduce themselves from name + class.
+        case 'greeting': return npc.dialogue.length ? npc.dialogue : [`Hello! I'm ${npc.name}, your ${npc.subject} teacher.`, 'Ask me anything, and we can go step by step together. What would you like to learn today?'];
         case 'returning': return reactions.completed;
         case 'declined': return reactions.declined;
         case 'passed': return reactions.passed;

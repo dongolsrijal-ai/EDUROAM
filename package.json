@@ -18,13 +18,23 @@
     "build": "node log.js build & vite build --config vite/config.prod.mjs",
     "dev-nolog": "vite --config vite/config.dev.mjs",
     "build-nolog": "vite build --config vite/config.prod.mjs",
-    "test": "node --test tests/*.test.mts"
+    "test": "node --test tests/*.test.mts",
+    "test:browser": "node tests/browserSmoke.mjs",
+    "test:browser:auth": "node tests/browserAuth.mjs",
+    "test:browser:shop": "node tests/browserShop.mjs",
+    "typecheck": "tsc --noEmit",
+    "test:edge": "npx --yes deno@2.9.6 test --no-config --allow-read --allow-env supabase/functions/tests/",
+    "check:edge": "npx --yes deno@2.9.6 check --no-config supabase/functions/npc-chat/index.ts supabase/functions/class-documents/index.ts supabase/functions/answer-dash/index.ts supabase/functions/voice-session/index.ts supabase/functions/voice-agent/index.ts supabase/functions/chert-webhook/index.ts"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.16",
+    "@electric-sql/pglite-pgvector": "0.0.17",
     "typescript": "~5.7.2",
     "vite": "^6.3.1"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.119.0",
+    "livekit-client": "2.23.0",
     "phaser": "4.0.0",
     "terser": "^5.39.0"
   }

@@ -1,9 +1,12 @@
 import { Boot } from './scenes/Boot';
 import { Hub } from './scenes/Hub';
 import { Dungeon } from './scenes/Dungeon';
+import { AnswerDash } from './minigames/answerDash/AnswerDashScene';
+import { Spellshot } from './minigames/spellshot/SpellshotScene';
 import { AUTO, Game, Scale, Types } from 'phaser';
 import { COLORS } from './config';
 import { deviceCanvasSize, keepCanvasSharp } from './display';
+import { attachGame } from './input/inputGuard';
 
 const StartGame = (parent: string) => {
     const { width, height, zoom } = deviceCanvasSize();
@@ -27,11 +30,13 @@ const StartGame = (parent: string) => {
             height,
             zoom,
         },
-        scene: [Boot, Hub, Dungeon],
+        scene: [Boot, Hub, Dungeon, AnswerDash, Spellshot],
     };
 
     const game = new Game(config);
     keepCanvasSharp(game);
+    // Typing in any text field (or the login gate) blocks every game key: see input/inputGuard.ts.
+    attachGame(game);
     return game;
 }
 

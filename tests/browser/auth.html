@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>EDUROAM auth test</title>
+<link rel="stylesheet" href="/style.css"></head><body>
+<div id="app"><div id="game-container"></div><div id="ui"></div></div>
+<pre id="auth-result">RUNNING</pre>
+<script>
+window.authErrors = [];
+window.addEventListener('error', (e) => { window.authErrors.push(e.error?.stack || e.message); document.getElementById('auth-result').textContent = 'FAIL: ' + (e.error?.stack || e.message); });
+window.addEventListener('unhandledrejection', (e) => { window.authErrors.push(e.reason?.stack || String(e.reason)); document.getElementById('auth-result').textContent = 'FAIL: ' + (e.reason?.stack || String(e.reason)); });
+</script>
+<script type="module" src="/tests/browser/auth.ts"></script>
+</body></html>

@@ -15,8 +15,6 @@ export function statLines (def: ItemDef): string[]
     const s = def.stats ?? {};
     return [
         s.defense ? `+${s.defense} Defense` : '',
-        s.meleeDamage ? `${s.meleeDamage} Melee damage` : '',
-        s.rangedDamage ? `${s.rangedDamage} Ranged damage` : '',
         s.heal ? `Restores ${s.heal} HP` : '',
     ].filter(Boolean);
 }

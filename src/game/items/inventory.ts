@@ -5,7 +5,7 @@ import { isItemId, itemDef, STARTER_KIT, type EquipSlot, type ItemId } from './i
 
 /** Backpack slots (9 per row; the UI shows a few rows and scrolls). */
 export const BACKPACK_SIZE = 54;
-export const EQUIP_SLOTS: EquipSlot[] = ['armor', 'melee', 'ranged', 'healing'];
+export const EQUIP_SLOTS: EquipSlot[] = ['armor', 'healing'];
 
 export interface ItemStack
 {
@@ -31,7 +31,7 @@ export function createEmptyInventory (): InventoryState
 {
     return {
         backpack: Array<Slot>(BACKPACK_SIZE).fill(null),
-        equipment: { armor: null, melee: null, ranged: null, healing: null },
+        equipment: { armor: null, healing: null },
     };
 }
 
@@ -127,23 +127,54 @@ export function consumeEquipped (inv: InventoryState, slot: EquipSlot, qty = 1):
     return true;
 }
 
+/**
+ * Throws away `qty` items from a BACKPACK stack. Equipped items are never discarded (unequip
+ * first). `expected` is the stack the player confirmed: if the slot no longer holds exactly
+ * that (moved, merged, replaced), nothing is removed. Returns false when rejected.
+ */
+export function discardItem (inv: InventoryState, ref: SlotRef, expected: ItemStack, qty: number): boolean
+{
+    if (ref.area !== 'backpack') return false;
+    const stack = inv.backpack[ref.index];
+    if (!stack || stack.itemId !== expected.itemId || stack.qty !== expected.qty) return false;
+    if (!Number.isInteger(qty) || qty < 1 || qty > stack.qty) return false;
+    stack.qty -= qty;
+    if (stack.qty === 0) inv.backpack[ref.index] = null;
+    return true;
+}
+
 export function countItem (inv: InventoryState, itemId: ItemId): number
 {
     return [...EQUIP_SLOTS.map((s) => inv.equipment[s]), ...inv.backpack]
         .reduce((sum, stack) => sum + (stack?.itemId === itemId ? stack.qty : 0), 0);
 }
 
-/** Totals from equipped items: the shared stats used by combat, healing and the UI. */
+/**
+ * Takes `qty` of an item out of the BACKPACK (spending crystals in the shop), emptying the
+ * last stacks first. All or nothing: returns false and changes nothing if there are too few.
+ */
+export function removeItem (inv: InventoryState, itemId: ItemId, qty: number): boolean
+{
+    const held = inv.backpack.reduce((sum, stack) => sum + (stack?.itemId === itemId ? stack.qty : 0), 0);
+    if (!Number.isInteger(qty) || qty < 0 || held < qty) return false;
+    for (let i = inv.backpack.length - 1; i >= 0 && qty > 0; i--)
+    {
+        const stack = inv.backpack[i];
+        if (stack?.itemId !== itemId) continue;
+        const take = Math.min(stack.qty, qty);
+        qty -= take;
+        inv.backpack[i] = stack.qty > take ? { itemId, qty: stack.qty - take } : null;
+    }
+    return true;
+}
+
+/** Totals from equipped items (armor defense, healing). Weapon damage comes from stat points. */
 export function equipmentStats (inv: InventoryState)
 {
     const stat = (slot: EquipSlot) => (inv.equipment[slot] ? itemDef(inv.equipment[slot]!.itemId).stats ?? {} : {});
     const healing = inv.equipment.healing;
     return {
         defense: stat('armor').defense ?? 0,
-        meleeDamage: stat('melee').meleeDamage ?? 0,
-        meleeCooldownMs: stat('melee').cooldownMs ?? 450,
-        rangedDamage: stat('ranged').rangedDamage ?? 0,
-        rangedCooldownMs: stat('ranged').cooldownMs ?? 650,
         healPerUse: stat('healing').heal ?? 0,
         healingCharges: healing?.qty ?? 0,
     };

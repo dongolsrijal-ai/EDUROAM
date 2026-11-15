@@ -3,20 +3,32 @@
 // player, NPCs + their buildings, collisions, camera, interactions (E), inventory (I),
 // NPC/building placement and, on combat maps only, the combat controller.
 
+import { saveNpc } from '../services/npcSync';
 import { GameObjects, Input, Physics, Scene, Tilemaps } from 'phaser';
 import { CHARACTER_SIZE } from '../config';
 import { CombatController, type FloatKind } from '../combat/CombatController';
+import type { Enemy } from '../combat/Enemy';
+import type { ScaleContext } from '../combat/scaling';
+import { DEV } from '../dev/devFlags';
+import { devHooks, type DevScene } from '../dev/devHooks';
 import { pixelZoom } from '../display';
 import { Building } from '../buildings/Building';
 import { BUILDING_FOR_APPEARANCE, BUILDING_H, BUILDING_TYPES, BUILDING_W, FRONT_CLEARANCE, NPC_HOME_OFFSET } from '../buildings/buildingTypes';
 import { npcStore, type MapId, type NpcRecord, type Placement } from '../data/npcStore';
 import { APPEARANCES, textureDataUrl, type AppearanceId } from '../npcs/appearances';
 import { runConversation } from '../npcs/conversation';
+import { backendConfigured } from '../services/backend';
+import { answerQuestion, finishAnswerDash, type DashSource, type MinigameSetup } from '../services/minigameApi';
+import type { DashHost } from '../minigames/answerDash/AnswerDashScene';
+import type { ShotHost } from '../minigames/spellshot/SpellshotScene';
+import type { MinigameLaunch } from '../ui/MinigamePanel';
+import { describeDashResults } from '../minigames/answerDash/results';
 import { currentPlayerId } from '../data/playerIdentity';
 import { Npc, npcFootprint, TALK_RANGE } from '../npcs/Npc';
 import { Player } from '../objects/Player';
-import { claimChallengeReward } from '../state/playerState';
+import { claimChallengeReward, type XpAward } from '../state/playerState';
 import { dungeonRun } from '../state/dungeonRun';
+import { pomodoro } from '../state/pomodoro';
 import type { Modal } from '../ui/dom';
 import { getUi } from '../ui';
 import type { WorldHost } from '../ui/NpcManager';
@@ -50,7 +62,7 @@ const overlaps = (a: Rect, b: Rect) => a.x < b.x + b.w && a.x + a.w > b.x && a.y
 
 type AnyBody = Physics.Arcade.Body | Physics.Arcade.StaticBody;
 
-export abstract class WorldScene extends Scene implements WorldHost
+export abstract class WorldScene extends Scene implements WorldHost, DevScene
 {
     abstract readonly mapId: MapId;
     /** Shown in the HUD. */
@@ -65,6 +77,18 @@ export abstract class WorldScene extends Scene implements WorldHost
 
     /** Called at the end of create(), once the player exists (spawn enemies, show messages...). */
     protected onWorldReady (): void
+    {
+        // optional
+    }
+
+    /** Tower level + floor used to scale enemies on this map. */
+    protected scaleContext (): ScaleContext
+    {
+        return { towerLevel: dungeonRun.state.towerLevel, floorIndex: dungeonRun.state.floorIndex };
+    }
+
+    /** An enemy died (combat maps override this, e.g. to clear rooms). */
+    protected onEnemyDefeated (_enemy: Enemy): void
     {
         // optional
     }
@@ -158,6 +182,10 @@ export abstract class WorldScene extends Scene implements WorldHost
                 canAct: () => !this.modal && !this.dialoguePending && this.inputEnabled && !this.warping,
                 float: (text, x, y, kind) => this.floatText(text, x, y, kind),
                 onPlayerDied: () => this.onPlayerDied(),
+                scaleContext: () => this.scaleContext(),
+                canStandAt: (x, y) => this.canStandAt(x, y),
+                onEnemyDefeated: (enemy) => this.onEnemyDefeated(enemy),
+                onResources: (r) => ui.hud.setResources(r),
             });
             const showHealth = () => ui.hud.setHealth(dungeonRun.state.hp, dungeonRun.maxHp);
             showHealth();
@@ -173,6 +201,11 @@ export abstract class WorldScene extends Scene implements WorldHost
             unsubscribe();
             unsubscribeRun();
             this.combat?.destroy();
+            ui.tutor.close();
+            ui.voice.close();
+            ui.inventory.close();
+            ui.shop.close();
+            ui.death.close();
             this.scale.off('resize', applyZoom);
             keyboard.off('keydown', this.onKeyDown);
             keyboard.enableGlobalCapture();
@@ -180,17 +213,43 @@ export abstract class WorldScene extends Scene implements WorldHost
             ui.talkTag.hide();
         });
 
+        if (DEV)
+        {
+            devHooks.scene = this;
+            this.events.once('shutdown', () => { if (devHooks.scene === this) devHooks.scene = null; });
+        }
         this.onWorldReady();
+    }
+
+    // ------------------------------------------------------------ dev panel (dev builds only)
+
+    get sceneKey ()
+    {
+        return this.scene.key;
+    }
+
+    devRefill (pool: 'arrows' | 'mana')
+    {
+        if (!DEV || !this.combat) return false;
+        this.combat.refill(pool);
+        return true;
+    }
+
+    devGoTo (key: 'Hub' | 'Dungeon')
+    {
+        if (!DEV) return;
+        if (key === this.scene.key) this.scene.restart({ spawn: 'start' });
+        else this.scene.start(key, { spawn: 'start' });
     }
 
     update (time: number, delta: number)
     {
         const ui = getUi();
         for (const npc of this.npcs) npc.tick(delta);
-        this.combat?.update(time);
+        this.combat?.update(time, delta);
 
         // Conversation finished: let that NPC roam again.
-        if (this.talkingTo && !this.dialoguePending && this.modal !== ui.dialogue && this.modal !== ui.quiz)
+        if (this.talkingTo && !this.dialoguePending && this.modal !== ui.dialogue && this.modal !== ui.quiz && this.modal !== ui.tutor && this.modal !== ui.voice && this.modal !== ui.minigames)
         {
             this.talkingTo.setTalking(false);
             this.talkingTo = null;
@@ -219,6 +278,16 @@ export abstract class WorldScene extends Scene implements WorldHost
         const camera = this.cameras.main;
         const cssScale = camera.zoom / this.scale.displayScale.x;
         return [(x - camera.worldView.x) * cssScale, (y - camera.worldView.y) * cssScale];
+    }
+
+    /** Shows an XP reward: floating "+N XP" at `at` (or a toast) and a level-up toast with the new points. */
+    protected announceXp (award: XpAward, at: Point | null, label = '')
+    {
+        if (award.status !== 'awarded' || !award.xp) return;
+        const ui = getUi();
+        if (at) this.floatText(`+${award.xp} XP`, at.x, at.y, 'info');
+        else ui.toasts.show(`${label ? `${label}: ` : ''}+${award.xp} XP`, 'reward');
+        if (award.levelsGained) ui.toasts.show(`Level up! You are level ${award.level}. +${3 * award.levelsGained} stat points (press I to spend).`, 'reward');
     }
 
     protected floatText (text: string, x: number, y: number, kind: FloatKind)
@@ -316,7 +385,7 @@ export abstract class WorldScene extends Scene implements WorldHost
         ui.setMode(!modal ? 'play' : modal === ui.inventory ? 'inventory' : 'talk');
     }
 
-    /** Single key router: open UI gets the key; otherwise E interacts, I opens the bag, F heals (combat maps). */
+    /** Single key router: open UI gets the key; otherwise E interacts, I opens the bag (+ stats), F heals (combat maps). Attacks: CombatController. */
     private onKeyDown = (event: KeyboardEvent) =>
     {
         if (event.repeat || !this.inputEnabled || this.warping) return;
@@ -339,19 +408,39 @@ export abstract class WorldScene extends Scene implements WorldHost
         {
             this.combat?.heal(); // no combat controller in the village: F does nothing there
         }
+
     };
 
-    /** Death screen; retrying restarts this run from the entrance (see dungeonRun.retryAfterDeath). */
-    private onPlayerDied ()
+    /**
+     * Death screen (opened once per death, also after a refresh at 0 HP). The dungeon clock is
+     * frozen while it is up. Retry: this run restarts from the current floor's entrance (full
+     * HP, guardian back, claimed chests stay claimed). Return to Village: the run ends with no
+     * boss reward and no tower advance; earlier rewards and gear are kept.
+     */
+    protected onPlayerDied ()
     {
         const ui = getUi();
+        if (this.modal === ui.death) return;
+        pomodoro.hold();
         this.setModal(ui.death);
         ui.setMode('dead');
         ui.death.open(() =>
         {
-            dungeonRun.retryAfterDeath();
+            if (!dungeonRun.retryAfterDeath())
+            {
+                ui.toasts.show('The retry could not be saved. Free browser storage and try again.', 'error');
+                return false;
+            }
+            pomodoro.release();
             this.setModal(null);
             this.scene.restart({ spawn: 'start' });
+        }, () =>
+        {
+            dungeonRun.abandon();
+            pomodoro.release();
+            pomodoro.finishDungeon(); // the break is over: back to studying
+            this.setModal(null);
+            this.scene.start('Hub', { spawn: 'fromDungeon' });
         });
     }
 
@@ -381,15 +470,104 @@ export abstract class WorldScene extends Scene implements WorldHost
                 this.setModal(ui.quiz);
                 ui.quiz.open(challenge, rewardAvailable, (score) => { this.setModal(null); onDone(score); });
             },
+            chat: backendConfigured ? () =>
+            {
+                // Typing must reach the text box, not Phaser's movement keys.
+                this.setModal(ui.tutor);
+                this.setInputEnabled(false);
+                ui.tutor.open(record, speaker.portrait, () =>
+                {
+                    this.setInputEnabled(true);
+                    this.setModal(null);
+                });
+            } : undefined,
+            call: backendConfigured ? () =>
+            {
+                this.setModal(ui.voice);
+                ui.voice.open(record, speaker.portrait, () => this.setModal(null));
+            } : undefined,
+            minigames: (legacy) => this.openMinigames(record, speaker.portrait, legacy),
             passed: (challenge) =>
             {
                 const { granted, full } = claimChallengeReward(challenge);
                 const { label } = challenge.reward;
                 if (granted) ui.toasts.show(`Challenge Complete!  +${granted} ${label}`, 'reward');
                 if (full) ui.toasts.show(granted ? 'Bag full: some of the reward was lost.' : 'Your bag is full! Make space, then win again to claim the reward.', 'error');
-                if (!record.completed) npcStore.update(record.id, { completed: true });
+                if (!record.completed && npcStore.update(record.id, { completed: true }).ok)
+                {
+                    void saveNpc(record.id).catch(() => ui.toasts.show('Challenge saved on this device, but not to your account yet. It will sync with your next change to this teacher.', 'error'));
+                }
             },
         });
+    }
+
+    // ------------------------------------------------------------ mini-games
+
+    /** The mini-game picker for this NPC; Back returns to the NPC's dialogue. */
+    private openMinigames (record: NpcRecord, portrait: string, legacy: { label: string; play: () => void } | null,
+        autoStart?: { source: DashSource; setup: MinigameSetup })
+    {
+        const ui = getUi();
+        this.setModal(ui.minigames);
+        this.setInputEnabled(false);
+        const restore = () => { this.setInputEnabled(true); this.setModal(null); };
+        ui.minigames.open(record, portrait, legacy, {
+            onBack: () => { restore(); this.reopenNpc(record.id); },
+            onLegacy: (play) => { restore(); play(); },
+            onStart: (launch) => this.launchMinigame(record, portrait, legacy, launch),
+        }, autoStart);
+    }
+
+    /**
+     * Runs a coursework mini-game (Answer Dash or Spellshot) as its own scene on top of this
+     * one. This scene is PAUSED (not stopped), so the village, NPCs and the player's position
+     * stay exactly as they were.
+     */
+    private launchMinigame (record: NpcRecord, portrait: string, legacy: { label: string; play: () => void } | null, launch: MinigameLaunch)
+    {
+        const ui = getUi();
+        const { pack, setup } = launch;
+        const key = setup.game === 'spellshot' ? 'Spellshot' : 'AnswerDash';
+        if (this.scene.isActive(key) || this.scene.isPaused(key)) return;
+        const hud = setup.game === 'spellshot' ? ui.shot : ui.dash;
+        this.setModal(hud);
+        this.setInputEnabled(false);
+        ui.setMode('minigame');
+        const sessionId = pack.sessionId;
+        const common = {
+            pack,
+            answer: (index: number, choice: number) => answerQuestion(sessionId, index, choice),
+            finish: () => finishAnswerDash(sessionId),
+            describeResults: (result: Parameters<typeof describeDashResults>[1]) => describeDashResults(record, result, setup.game, sessionId),
+            exit: (reason: 'npc' | 'again') =>
+            {
+                hud.close();
+                this.scene.stop(key);
+                this.scene.resume();
+                this.setInputEnabled(true);
+                this.setModal(null);
+                if (reason === 'again') this.openMinigames(record, portrait, legacy, { source: launch.source, setup });
+                else this.reopenNpc(record.id);
+            },
+        };
+        const host: DashHost | ShotHost = setup.game === 'spellshot' ? { ...common, hud: ui.shot, speed: setup.speed } : { ...common, hud: ui.dash };
+        this.scene.launch(key, { host });
+        this.scene.pause();
+    }
+
+    /** The permanent crystal shop (village stall): weapons, upgrades and village customization. */
+    protected openShop ()
+    {
+        const ui = getUi();
+        this.setModal(ui.shop);
+        ui.shop.open(() => this.setModal(null));
+    }
+
+    /** Back to the same NPC's dialogue (after a mini-game or the picker's Back). */
+    private reopenNpc (npcId: string)
+    {
+        const npc = this.npcs.find((n) => n.record.id === npcId);
+        if (npc) this.talkTo(npc);
     }
 
     protected warpTo (warp: Warp)

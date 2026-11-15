@@ -1,11 +1,12 @@
 // Regression tests: dungeon chest rewards are durable and idempotent across interrupted saves,
+// discarding items frees a full bag (no dungeon softlock) without making rewards claimable again,
 // refreshes, death retries and legacy saves.
 //
 // Run: npm test   (node --test; Node strips the types, Vite's SSR module runner loads the game
 // modules). Every boot() is a fresh page load: new module instances reading the same storage.
 
 import assert from 'node:assert/strict';
-import { after, before, test } from 'node:test';
+import { after, afterEach, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createServer, createServerModuleRunner, type ViteDevServer } from 'vite';
 
@@ -64,6 +65,7 @@ after(async () =>
     await Promise.all(runners.map((r) => r.close()));
     await server.close();
 });
+afterEach(async () => { await Promise.all(runners.splice(0).map((r) => r.close())); });
 
 /** A page load: fresh dungeonRun / playerState module instances on top of `storage`. */
 async function boot (storage: MemoryStorage)
@@ -93,7 +95,7 @@ const savedReceipts = (s: MemoryStorage): Record<string, { itemId: string; total
     saved(s, PLAYER_KEY)?.chestReceipts ?? {};
 const savedReceipt = (s: MemoryStorage, runId: string, chestId: string) => savedReceipts(s)[`${runId}/${chestId}`];
 
-const EMPTY_EQUIPMENT = { armor: null, melee: null, ranged: null, healing: null };
+const EMPTY_EQUIPMENT = { armor: null, healing: null };
 const emptyBackpack = () => Array.from({ length: 54 }, () => null as { itemId: string; qty: number } | null);
 
 /** Calls `fn` with a copy of the storage taken right after the next successful write of `key`. */
@@ -174,7 +176,7 @@ test('interruption after the player save but before the dungeon save neither dup
 test('partial delivery survives the same interruption; only the remainder is collectible', async () =>
 {
     const s = new MemoryStorage();
-    const backpack = emptyBackpack().map(() => ({ itemId: 'iron_sword', qty: 1 }));
+    const backpack = emptyBackpack().map(() => ({ itemId: 'reinforced_armor', qty: 1 }));
     backpack[53] = { itemId: 'magic_crystal', qty: 97 }; // room for 2 more crystals only
     s.data.set(PLAYER_KEY, JSON.stringify({
         version: 3, inventory: { backpack, equipment: EMPTY_EQUIPMENT }, claimedChallenges: [], starterKitGranted: true,
@@ -197,8 +199,8 @@ test('partial delivery survives the same interruption; only the remainder is col
     assert.deepEqual(savedChest(crashed, SIDE), { itemId: 'magic_crystal', total: 4, qty: 2, granted: false });
     assert.equal(player.count('magic_crystal'), 99);
 
-    // Make room (equip a sword), then collect: exactly the 2 still owed.
-    assert.equal(player.move({ area: 'backpack', index: 0 }, { area: 'equipment', slot: 'melee' }), 'moved');
+    // Make room (wear one of the armors), then collect: exactly the 2 still owed.
+    assert.equal(player.move({ area: 'backpack', index: 0 }, { area: 'equipment', slot: 'armor' }), 'moved');
     const rest = dungeonRun.openChest(SIDE, false, noReroll);
     assert.equal(rest.status === 'opened' && rest.grantedQty, 2);
     assert.equal(player.count('magic_crystal'), 101);
@@ -221,18 +223,18 @@ test('a failed initial roll save awards nothing and does not unlock the exit', a
     const dungeonBefore = s.getItem(DUNGEON_KEY);
 
     s.failKeys.add(DUNGEON_KEY);
-    const result = dungeonRun.openChest(FINAL, true, roller('hunter_bow', 1).roll);
+    const result = dungeonRun.openChest(FINAL, true, roller('warden_plate', 1).roll);
     assert.deepEqual(result, { status: 'saveFailed' });
     assert.equal(dungeonRun.state.chests[FINAL], undefined, 'unsaved roll is forgotten');
-    assert.equal(player.count('hunter_bow'), 0);
+    assert.equal(player.count('warden_plate'), 0);
     assert.equal(dungeonRun.state.exitUnlocked, false);
     assert.equal(s.getItem(PLAYER_KEY), playerBefore);
     assert.equal(s.getItem(DUNGEON_KEY), dungeonBefore);
 
     s.failKeys.clear();
-    const retry = dungeonRun.openChest(FINAL, true, roller('hunter_bow', 1).roll);
+    const retry = dungeonRun.openChest(FINAL, true, roller('warden_plate', 1).roll);
     assert.equal(retry.status === 'opened' && retry.grantedQty, 1);
-    assert.equal(player.count('hunter_bow'), 1);
+    assert.equal(player.count('warden_plate'), 1);
     assert.equal(dungeonRun.state.exitUnlocked, true);
 });
 
@@ -305,7 +307,7 @@ test('claimed chests stay claimed after death retry (also after refreshing while
     dungeonRun.start(FLOOR);
     const runId = dungeonRun.state.runId;
     dungeonRun.defeatGuardian();
-    dungeonRun.openChest(FINAL, true, roller('hunter_bow', 1).roll);
+    dungeonRun.openChest(FINAL, true, roller('warden_plate', 1).roll);
     assert.equal(dungeonRun.state.exitUnlocked, true);
 
     dungeonRun.damage(1000);
@@ -323,7 +325,7 @@ test('claimed chests stay claimed after death retry (also after refreshing while
     dungeonRun.defeatGuardian();
     const again = dungeonRun.openChest(FINAL, true, noReroll);
     assert.equal(again.status === 'opened' && again.grantedQty, 0);
-    assert.equal(player.count('hunter_bow'), 1);
+    assert.equal(player.count('warden_plate'), 1);
     assert.equal(dungeonRun.state.exitUnlocked, true);
 });
 
@@ -335,7 +337,7 @@ test('a genuinely new run gets a new identity and its own chest rewards', async 
     const firstRun = dungeonRun.state.runId;
     dungeonRun.openChest(SIDE, false, roller('magic_crystal', 2).roll);
     dungeonRun.defeatGuardian();
-    dungeonRun.openChest(FINAL, true, roller('iron_sword', 1).roll);
+    dungeonRun.openChest(FINAL, true, roller('reinforced_armor', 1).roll);
     assert.ok(dungeonRun.complete());
 
     ({ dungeonRun, player } = await boot(s));
@@ -349,48 +351,59 @@ test('a genuinely new run gets a new identity and its own chest rewards', async 
     assert.equal(result.status === 'opened' && result.grantedQty, 3);
     assert.equal(loot.calls, 1);
     assert.equal(player.count('magic_crystal'), 5);
-    assert.equal(player.count('iron_sword'), 1);
+    assert.equal(player.count('reinforced_armor'), 1);
     assert.deepEqual(Object.keys(savedReceipts(s)), [`${secondRun}/${SIDE}`], 'finished run receipts are pruned');
 });
 
-test('legacy saves load without reset; legacy granted chests stay paid, pending ones are kept', async () =>
+test('legacy saves load without reset; legacy granted chests stay paid, pending ones are kept; removed weapons migrate', async () =>
 {
     const s = new MemoryStorage();
     const backpack = emptyBackpack();
     backpack[0] = { itemId: 'magic_crystal', qty: 5 };
-    backpack[1] = { itemId: 'iron_sword', qty: 1 };
+    backpack[1] = { itemId: 'reinforced_armor', qty: 1 };
     const equipment = {
+        // Pre-overhaul save: weapons were items in melee / ranged slots.
         armor: { itemId: 'cloth_armor', qty: 1 }, melee: { itemId: 'wooden_sword', qty: 1 },
-        ranged: null, healing: { itemId: 'small_health_potion', qty: 2 },
+        ranged: { itemId: 'hunter_bow', qty: 1 }, healing: { itemId: 'small_health_potion', qty: 2 },
     };
+    backpack[2] = { itemId: 'soulsteel_sword', qty: 1 };
     s.data.set(PLAYER_KEY, JSON.stringify({
         version: 3, inventory: { backpack, equipment }, claimedChallenges: ['intro-math'], starterKitGranted: true,
     }));
     const PAID = 'floor-1:a:1,1';
     const PENDING = 'floor-1:b:2,2';
+    const PAID_WEAPON = 'floor-1:c:3,3';
     s.data.set(DUNGEON_KEY, JSON.stringify({
         version: 1, floorId: FLOOR, active: true, completed: false, guardianDefeated: true, finalChestOpened: false,
         exitUnlocked: false, hp: 60, stats: { runs: 2, deaths: 1, completions: 1 },
         chests: {
-            [PAID]: { itemId: 'iron_sword', qty: 0, granted: true },
+            [PAID]: { itemId: 'reinforced_armor', qty: 0, granted: true },
             [PENDING]: { itemId: 'magic_crystal', qty: 3, granted: false },
+            [PAID_WEAPON]: { itemId: 'iron_sword', qty: 0, granted: true },
         },
     }));
 
     let { dungeonRun, player, isChallengeClaimed } = await boot(s);
     assert.equal(player.count('magic_crystal'), 5);
-    assert.equal(player.count('iron_sword'), 1);
+    assert.equal(player.count('reinforced_armor'), 1);
     assert.equal(player.count('cloth_armor'), 1, 'starter kit not granted again');
-    assert.equal(player.count('training_bow'), 0, 'starter kit not granted again');
+    assert.equal(player.count('small_health_potion'), 2, 'starter kit not granted again');
+    // Removed weapon items leave the inventory (weapons are permanent now); the original is backed up.
+    assert.ok(player.inventory.backpack.every((st) => !st || ['magic_crystal', 'reinforced_armor'].includes(st.itemId)));
+    assert.ok(!('melee' in player.inventory.equipment) && !('ranged' in player.inventory.equipment));
+    assert.match(s.getItem(`${PLAYER_KEY}.weapons-backup`) ?? '', /wooden_sword/);
+    assert.ok(!/wooden_sword|hunter_bow|soulsteel_sword/.test(s.getItem(PLAYER_KEY)!), 'migrated save has no weapon items');
     assert.deepEqual(player.inventory.equipment.healing, { itemId: 'small_health_potion', qty: 2 });
     assert.ok(isChallengeClaimed('intro-math'));
     assert.deepEqual(saved(s, PLAYER_KEY).chestReceipts, {});
 
     assert.equal(dungeonRun.state.guardianDefeated, true);
-    assert.equal(dungeonRun.state.hp, 60);
+    assert.equal(dungeonRun.state.hp, 50, 'legacy HP is clamped to the new maximum; items and receipts are preserved');
     assert.deepEqual(dungeonRun.state.stats, { runs: 2, deaths: 1, completions: 1 });
-    assert.deepEqual(dungeonRun.state.chests[PAID], { itemId: 'iron_sword', total: 0, qty: 0, granted: true });
+    assert.deepEqual(dungeonRun.state.chests[PAID], { itemId: 'reinforced_armor', total: 0, qty: 0, granted: true });
     assert.deepEqual(dungeonRun.state.chests[PENDING], { itemId: 'magic_crystal', total: 3, qty: 3, granted: false });
+    assert.deepEqual(dungeonRun.state.chests[PAID_WEAPON], { itemId: 'number_crystal', total: 0, qty: 0, granted: true }, 'a chest that paid a removed weapon stays paid');
+    assert.equal(dungeonRun.state.paysXp, false, 'a run saved before XP existed pays no XP');
 
     dungeonRun.start(FLOOR); // resumes the legacy run
     const runId = dungeonRun.state.runId;
@@ -399,7 +412,7 @@ test('legacy saves load without reset; legacy granted chests stay paid, pending 
 
     const paid = dungeonRun.openChest(PAID, false, noReroll);
     assert.equal(paid.status === 'opened' && paid.grantedQty, 0);
-    assert.equal(player.count('iron_sword'), 1);
+    assert.equal(player.count('reinforced_armor'), 1);
 
     const pending = dungeonRun.openChest(PENDING, false, noReroll);
     assert.equal(pending.status === 'opened' && pending.grantedQty, 3);
@@ -441,4 +454,146 @@ test('existing v1 / v2 player migrations still work and never duplicate the star
     ({ player } = await boot(v1));
     assert.equal(player.count('cloth_armor'), 1, 'starter kit granted exactly once');
     assert.equal(player.count('number_crystal'), 7);
+});
+
+// ------------------------------------------------------------ discarding (full-backpack softlock)
+
+/** A save whose 54 backpack slots are all taken: 53 armors (they do not stack) + one crystal stack. */
+function fullBagSave (crystals = 99)
+{
+    const s = new MemoryStorage();
+    const backpack = emptyBackpack().map(() => ({ itemId: 'reinforced_armor', qty: 1 }));
+    backpack[53] = { itemId: 'magic_crystal', qty: crystals };
+    s.data.set(PLAYER_KEY, JSON.stringify({
+        version: 3, claimedChallenges: ['intro-math'], starterKitGranted: true,
+        inventory: { backpack, equipment: { ...EMPTY_EQUIPMENT, armor: { itemId: 'cloth_armor', qty: 1 } } },
+    }));
+    return s;
+}
+
+test('discard removes one item or a whole stack, saves it, and protects equipped items', async () =>
+{
+    const s = fullBagSave();
+    let { player, isChallengeClaimed, onPlayerStateChange } = await boot(s);
+    const crystals = { area: 'backpack', index: 53 } as const;
+    let changes = 0;
+    onPlayerStateChange(() => changes++);
+
+    assert.equal(player.discard(crystals, { itemId: 'magic_crystal', qty: 99 }, 1), 'discarded');
+    assert.equal(player.count('magic_crystal'), 98);
+    assert.equal(changes, 1, 'listeners told immediately');
+    assert.deepEqual(saved(s, PLAYER_KEY).inventory.backpack[53], { itemId: 'magic_crystal', qty: 98 });
+
+    // Stale confirmation (stack no longer matches what the player confirmed) removes nothing.
+    assert.equal(player.discard(crystals, { itemId: 'magic_crystal', qty: 99 }, 99), 'rejected');
+    assert.equal(player.discard(crystals, { itemId: 'reinforced_armor', qty: 98 }, 1), 'rejected');
+    // Invalid quantities.
+    for (const qty of [0, -1, 1.5, 99, Number.NaN])
+        assert.equal(player.discard(crystals, { itemId: 'magic_crystal', qty: 98 }, qty), 'rejected');
+    // Equipped items are never discarded; empty / out-of-range slots neither.
+    assert.equal(player.discard({ area: 'equipment', slot: 'armor' }, { itemId: 'cloth_armor', qty: 1 }, 1), 'rejected');
+    assert.equal(player.discard({ area: 'backpack', index: 99 }, { itemId: 'reinforced_armor', qty: 1 }, 1), 'rejected');
+    assert.equal(player.count('cloth_armor'), 1);
+    assert.equal(changes, 1, 'rejections change nothing');
+
+    assert.equal(player.discard(crystals, { itemId: 'magic_crystal', qty: 98 }, 98), 'discarded');
+    assert.equal(player.inventory.backpack[53], null, 'whole stack frees the slot');
+    assert.equal(player.discard({ area: 'backpack', index: 0 }, { itemId: 'reinforced_armor', qty: 1 }, 1), 'discarded');
+    assert.equal(player.inventory.backpack[0], null, 'last item frees the slot');
+    assert.equal(player.discard({ area: 'backpack', index: 0 }, { itemId: 'reinforced_armor', qty: 1 }, 1), 'rejected', 'empty slot');
+
+    ({ player, isChallengeClaimed } = await boot(s));
+    assert.equal(player.count('magic_crystal'), 0);
+    assert.equal(player.count('reinforced_armor'), 52, '53 armors minus the discarded one');
+    assert.equal(player.count('cloth_armor'), 1);
+    assert.ok(isChallengeClaimed('intro-math'), 'other progress kept');
+});
+
+test('a failed discard save keeps the item and notifies nobody', async (t) =>
+{
+    t.mock.method(console, 'error', () => {});
+    const s = fullBagSave();
+    const { player, onPlayerStateChange } = await boot(s);
+    const before = s.getItem(PLAYER_KEY);
+    let changes = 0;
+    onPlayerStateChange(() => changes++);
+
+    s.failKeys.add(PLAYER_KEY);
+    assert.equal(player.discard({ area: 'backpack', index: 0 }, { itemId: 'reinforced_armor', qty: 1 }, 1), 'saveFailed');
+    assert.deepEqual(player.inventory.backpack[0], { itemId: 'reinforced_armor', qty: 1 });
+    assert.equal(player.count('reinforced_armor'), 53, 'all 53 armors still there');
+    assert.equal(changes, 0);
+    assert.equal(s.getItem(PLAYER_KEY), before);
+
+    s.failKeys.clear();
+    assert.equal(player.discard({ area: 'backpack', index: 0 }, { itemId: 'reinforced_armor', qty: 1 }, 1), 'discarded');
+    assert.equal(player.count('reinforced_armor'), 52);
+});
+
+test('full bag: final reward stays pending, discard frees space, collect after reload unlocks the exit once', async () =>
+{
+    const s = fullBagSave();
+    let { dungeonRun, player } = await boot(s);
+    dungeonRun.start(FLOOR);
+    dungeonRun.defeatGuardian();
+    const runId = dungeonRun.state.runId;
+
+    const blocked = dungeonRun.openChest(FINAL, true, roller('warden_plate', 1).roll);
+    assert.equal(blocked.status === 'opened' && blocked.grantedQty, 0);
+    assert.deepEqual(savedChest(s, FINAL), { itemId: 'warden_plate', total: 1, qty: 1, granted: false });
+    assert.equal(dungeonRun.state.exitUnlocked, false);
+
+    // Refresh while stuck: the reward is still owed and is not re-rolled.
+    ({ dungeonRun, player } = await boot(s));
+    dungeonRun.start(FLOOR);
+    assert.equal(dungeonRun.state.runId, runId);
+    assert.equal(dungeonRun.openChest(FINAL, true, noReroll).status, 'opened');
+    assert.equal(dungeonRun.state.exitUnlocked, false);
+
+    assert.equal(player.discard({ area: 'backpack', index: 7 }, { itemId: 'reinforced_armor', qty: 1 }, 1), 'discarded');
+    ({ dungeonRun, player } = await boot(s));
+    dungeonRun.start(FLOOR);
+    assert.equal(player.count('reinforced_armor'), 52, 'discard survived reload');
+
+    const collected = dungeonRun.openChest(FINAL, true, noReroll);
+    assert.equal(collected.status === 'opened' && collected.grantedQty, 1);
+    assert.equal(player.count('warden_plate'), 1);
+    assert.deepEqual(savedReceipt(s, runId, FINAL), { itemId: 'warden_plate', total: 1, delivered: 1 });
+    assert.equal(dungeonRun.state.exitUnlocked, true);
+
+    // Throwing the claimed reward away never makes it claimable again (receipt, not inventory, decides).
+    const bow = player.inventory.backpack.findIndex((slot) => slot?.itemId === 'warden_plate');
+    assert.equal(player.discard({ area: 'backpack', index: bow }, { itemId: 'warden_plate', qty: 1 }, 1), 'discarded');
+    assert.deepEqual(savedReceipt(s, runId, FINAL), { itemId: 'warden_plate', total: 1, delivered: 1 }, 'receipt untouched');
+    const again = dungeonRun.openChest(FINAL, true, noReroll);
+    assert.equal(again.status === 'opened' && again.grantedQty, 0);
+
+    ({ dungeonRun, player } = await boot(s));
+    dungeonRun.start(FLOOR);
+    const afterReload = dungeonRun.openChest(FINAL, true, noReroll);
+    assert.equal(afterReload.status === 'opened' && afterReload.grantedQty, 0);
+    assert.equal(player.count('warden_plate'), 0);
+    assert.equal(dungeonRun.state.exitUnlocked, true);
+    assert.equal(dungeonRun.complete(), true);
+});
+
+test('partial delivery into a full bag: discarding lets only the remainder be collected', async () =>
+{
+    const s = fullBagSave(97); // room for 2 crystals
+    let { dungeonRun, player } = await boot(s);
+    dungeonRun.start(FLOOR);
+    const runId = dungeonRun.state.runId;
+
+    const first = dungeonRun.openChest(SIDE, false, roller('magic_crystal', 5).roll);
+    assert.equal(first.status === 'opened' && first.grantedQty, 2);
+    assert.equal(player.count('magic_crystal'), 99);
+
+    assert.equal(player.discard({ area: 'backpack', index: 53 }, { itemId: 'magic_crystal', qty: 99 }, 99), 'discarded');
+    ({ dungeonRun, player } = await boot(s));
+    dungeonRun.start(FLOOR);
+    const rest = dungeonRun.openChest(SIDE, false, noReroll);
+    assert.equal(rest.status === 'opened' && rest.grantedQty, 3);
+    assert.equal(player.count('magic_crystal'), 3);
+    assert.deepEqual(savedReceipt(s, runId, SIDE), { itemId: 'magic_crystal', total: 5, delivered: 5 });
+    assert.deepEqual(savedChest(s, SIDE), { itemId: 'magic_crystal', total: 5, qty: 0, granted: true });
 });
