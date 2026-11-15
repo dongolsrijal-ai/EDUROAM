@@ -1,36 +1,57 @@
-// POST /functions/v1/voice-agent   (called ONLY by the LiveKit agent "eduroam-tutor")
+// POST /functions/v1/voice-agent   (called ONLY by the custom LiveKit agent, agent/agent.py)
 //   Authorization: Bearer <VOICE_AGENT_SECRET>      (shared secret, server-side on both ends)
 //
 //   resolve  { pairing_id }                 -> claims the pairing ONCE; returns the NPC's name, class,
-//                                              teaching preferences, student memory, coursework and
-//                                              ready-made voice instructions          (in-game calls)
+//                                              teaching preferences, student memory, coursework,
+//                                              upcoming assignments and ready-made voice instructions
 //   pair     { call_id, code }              -> FaceTime: the 6-digit code the caller said, for this call
 //                                              (max 5 tries); on success the same context + pairing_id
-//   search   { pairing_id, query }          -> coursework excerpts for THIS student + NPC only
-//   progress { pairing_id }                 -> that student's memory + progress with this NPC
-//   end      { pairing_id, summary, topics? } -> saves a short learning summary to npc_memories (once)
 //   call_ended { call_id }                  -> FaceTime call over: frees the shared line
+//   ...then, for a claimed and unexpired session only (the tutor's tools, see _shared/tutorTools.ts):
+//   search { query }                        -> coursework excerpts (this class + the student's own uploads)
+//   progress                                -> mastered / weak topics + recent quiz results
+//   memory_search { query? }                -> memory, preferences and matching earlier text-chat lines
+//   memory_save { summary?, topics?, mastered?, needs_practice?, preference?, preference_confirmed? }
+//   assignments                             -> this class's assignments + deadlines found in its files
+//   assignment_save { assignment_id?, title?, due?, student_confirmed_due?, status?, estimated_minutes? }
+//   tasks { op: list|create|update, ... }   -> study sessions (create/move need student_approved)
+//   study_plan { daily_minutes?, start_hour?, days? } -> a proposal; nothing is saved
+//   web { query }                           -> public web answer with source links (no private data sent)
+//   end { summary, topics? }                -> saves the learning summary to npc_memories (once)
 //
 // The pairing id is the only identifier accepted; player and NPC come from the session row the
 // voice-session function created after authorising the student. All queries filter by that
 // player explicitly (this function uses the service-role client).
 
+import { GoogleGenAI } from 'npm:@google/genai@3.3.0';
 import { adminClient, HttpError, json, readJson, serve, withinRateLimit } from '../_shared/http.ts';
 import { loadClassKnowledge, resolveNpcIdentity, retrieveStudentMemory } from '../_shared/npcContext.ts';
+import { dueLabel } from '../_shared/schedule.ts';
+import {
+    listAssignments, manageTasks, memorySave, memorySearch, saveAssignment, studentProgress, studentTimezone, studyPlan, webSearch, type ToolContext,
+} from '../_shared/tutorTools.ts';
 import { buildVoiceInstructions, hashPairingCode, memoryAfterCall, parseAgentRequest, searchResponse, secretMatches, SESSION_MAX_SECONDS } from '../_shared/voice.ts';
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.119.0';
 
-/** Everything the agent may know for one authorised student + NPC session. */
+let gemini: GoogleGenAI | null = null;
+
+/** Everything the agent may know at the start of one authorised student + NPC session. */
 async function sessionContext (admin: SupabaseClient, playerId: string, npcId: string, room: string)
 {
     // Re-verifies the student may still use this NPC (explicit owner/member check).
     const npc = await resolveNpcIdentity(admin, playerId, npcId);
-    const { memory, progress } = await retrieveStudentMemory(admin, playerId, npc);
+    const [{ memory, progress }, tz] = await Promise.all([retrieveStudentMemory(admin, playerId, npc), studentTimezone(admin, playerId)]);
     // Opening coursework: what they last studied, else the newest material for the subject.
     const knowledge = await loadClassKnowledge(admin, playerId, npc, memory.currentTopic || npc.subject, 4);
     const materials = knowledge.materials.map((m) => (m.status === 'ready' ? m.title : `${m.title} (${m.status}, not searchable yet)`));
+    const now = new Date();
+    const { data: work } = await admin.from('assignments').select('title, due_at, due_status')
+        .eq('player_id', playerId).eq('class_id', npc.classId).is('deleted_at', null).neq('status', 'done')
+        .gte('due_at', now.toISOString()).order('due_at').limit(5);
+    const upcoming = (work ?? []).map((a) => `${a.title}: ${dueLabel(new Date(a.due_at), now, tz)}${a.due_status === 'suggested' ? ' (date not confirmed)' : ''}`);
     return {
         room,
+        timezone: tz,
         npc: { name: npc.name, subject: npc.subject, class_name: npc.className },
         teaching_preferences: memory.learningPreferences,
         memory: { summary: memory.summary, current_topic: memory.currentTopic, topics_studied: memory.topicsStudied },
@@ -39,7 +60,8 @@ async function sessionContext (admin: SupabaseClient, playerId: string, npcId: s
             documents: knowledge.materials.map((m) => ({ title: m.title, status: m.status, mine: m.visibility === 'private' })),
             excerpts: knowledge.chunks.map((c) => ({ title: c.title, text: c.text, page: c.pageStart ?? null })),
         },
-        instructions: buildVoiceInstructions(npc, memory, progress, materials),
+        upcoming,
+        instructions: buildVoiceInstructions(npc, memory, progress, materials, upcoming),
     };
 }
 
@@ -86,30 +108,40 @@ serve(async (req) =>
         return json(200, { ok: true });
     }
 
-    // search / progress / end: only for a session that was claimed recently and has not ended.
+    // Everything else: only for a session that was claimed recently and has not ended.
     const { data: session, error } = await admin.from('voice_sessions').select('id, player_id, npc_id, claimed_at, ended_at')
         .eq('id', request.pairingId).not('claimed_at', 'is', null).maybeSingle();
     if (error) throw new Error(error.message);
     const active = session && !session.ended_at && Date.now() - new Date(session.claimed_at).getTime() < SESSION_MAX_SECONDS * 1000;
 
-    if (request.action === 'progress')
+    if (request.action !== 'end')
     {
         if (!active) throw new HttpError(404, 'session_inactive', 'This voice session is not active.');
+        if (!(await withinRateLimit(admin, session.player_id, 'voice-tools:minute', 40, 60))) throw new HttpError(429, 'rate_limited', 'Too many requests; try again in a moment.');
         const npc = await resolveNpcIdentity(admin, session.player_id, session.npc_id);
-        const { memory, progress } = await retrieveStudentMemory(admin, session.player_id, npc);
-        return json(200, {
-            memory: { summary: memory.summary, current_topic: memory.currentTopic, topics_studied: memory.topicsStudied },
-            progress: { topics_mastered: progress.topicsMastered, topics_needing_practice: progress.topicsNeedingPractice },
-        });
-    }
-
-    if (request.action === 'search')
-    {
-        if (!active) throw new HttpError(404, 'session_inactive', 'This voice session is not active.');
-        if (!(await withinRateLimit(admin, session.player_id, 'voice-search:minute', 20, 60))) throw new HttpError(429, 'rate_limited', 'Too many searches; try again in a moment.');
-        const npc = await resolveNpcIdentity(admin, session.player_id, session.npc_id);
-        const { materials, chunks } = await loadClassKnowledge(admin, session.player_id, npc, request.query, 5);
-        return json(200, searchResponse(materials, chunks));
+        const ctx: ToolContext = { admin, playerId: session.player_id, npc, tz: await studentTimezone(admin, session.player_id), now: new Date() };
+        switch (request.action)
+        {
+            case 'search':
+            {
+                if (!(await withinRateLimit(admin, session.player_id, 'voice-search:minute', 20, 60))) throw new HttpError(429, 'rate_limited', 'Too many searches; try again in a moment.');
+                const { materials, chunks } = await loadClassKnowledge(admin, session.player_id, npc, request.query, 5);
+                return json(200, searchResponse(materials, chunks));
+            }
+            case 'progress': return json(200, await studentProgress(ctx));
+            case 'memory_search': return json(200, await memorySearch(ctx, request));
+            case 'memory_save': return json(200, await memorySave(ctx, request));
+            case 'assignments': return json(200, await listAssignments(ctx));
+            case 'assignment_save': return json(200, await saveAssignment(ctx, request));
+            case 'tasks': return json(200, await manageTasks(ctx, request));
+            case 'study_plan': return json(200, await studyPlan(ctx, request));
+            case 'web':
+            {
+                const apiKey = Deno.env.get('GEMINI_API_KEY');
+                if (apiKey) gemini ??= new GoogleGenAI({ apiKey });
+                return json(200, await webSearch(ctx, request, gemini, Deno.env.get('GEMINI_MODEL') || undefined));
+            }
+        }
     }
 
     // end: the first call saves the summary; repeats (or calls after the window) save nothing.
@@ -127,9 +159,8 @@ serve(async (req) =>
     const { error: saveError } = await admin.from('npc_memories').upsert({
         player_id: session.player_id, npc_id: npc.id, summary: next.summary, current_topic: next.currentTopic,
         topics_studied: next.topicsStudied, learning_preferences: next.learningPreferences,
-        channels_used: [...new Set([...(row?.channels_used ?? []), 'facetime'])], updated_at: new Date().toISOString(),
+        channels_used: [...new Set([...(row?.channels_used ?? []), 'voice'])], updated_at: new Date().toISOString(),
     }, { onConflict: 'player_id,npc_id' });
     if (saveError) throw new Error(saveError.message);
     return json(200, { saved: true });
 });
-

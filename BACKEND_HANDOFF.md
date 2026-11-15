@@ -376,3 +376,48 @@ registered fields: `npc_name`, `subject`, `personality`, `teaching_style`, `cour
 - Deployed as voice-session v16: a single esbuild bundle of the function and its `_shared` modules,
   with the `npm:` imports kept external.
 - Tests: `supabase/functions/tests/voice_builder_test.ts` (`npm run test:edge`).
+
+## AI tutor: phases 1-3 (2026-11-15)
+
+**Phase 1.** Audit plus the Git checkpoint `checkpoint-pre-ai-tutor` (c721988, deployed state).
+- Python worker: claimed 3 real in-game calls.
+- Builder `eduroam-tutor` (`CA_DsfmFTRP5ir5`) redeployed 08:20 UTC.
+- No assignment, calendar or reminder tables existed.
+
+**Phase 2 (code + tests; NOT deployed).**
+- Migration `20261117000000_tutor_assignments.sql` (expand-only):
+  - `assignments` (suggested or confirmed due dates, soft delete), `study_tasks` and `players.timezone`.
+  - Owner-only RLS; the trigger `check_student_work` re-checks class, NPC, document and assignment
+    access for every writer, including the service role.
+- `_shared/schedule.ts`:
+  - IANA timezones and DST-correct conversion;
+  - deadline SUGGESTIONS from documents (never invented);
+  - the tutor's change rules (confirmed dates protected);
+  - a deterministic study planner.
+- `_shared/tutorTools.ts`: memory search/save (preferences only with consent), progress plus quizzes,
+  assignments, tasks (approval required), study plan (proposal only), and public web search (grounded,
+  real links, no private data).
+- voice-agent actions: `memory_search`, `memory_save`, `assignments`, `assignment_save`, `tasks`,
+  `study_plan`, `web`. All need a claimed, unexpired session and are rate-limited (40/min).
+- voice-session stores the browser timezone; the context sent at call start includes upcoming deadlines.
+- `agent.py` tools: `search_coursework`, `search_learning_memory`, `save_learning_memory`,
+  `get_student_progress`, `get_assignments`, `save_assignment`, `create_study_plan`,
+  `manage_study_tasks`, `search_public_web`, `analyze_camera`, `save_session_summary`.
+  - Arguments are sanitised, outputs capped at 3.5 KB, backend timeout 8 s (web 15 s).
+  - Fix: instructions are no longer rewritten on camera changes. Gemini Live (Gemini API) appends each
+    update as a model turn.
+- Calendar and reminder tools are deliberately NOT registered until phase 6 works end to end.
+
+**Phase 3 (prepared and tested locally).**
+- Pinned requirements (BOM removed); Dockerfile HEALTHCHECK on 8081; tests kept out of the image.
+- `railway.json`; limits for call length, idle processes, job memory and drain.
+- `agent/DEPLOY.md`: the rollout and rollback steps.
+- Verified in a Linux container: the worker registered, health 200, and a test job reached voice-agent
+  and Gemini Live.
+
+**Deploy order (owner):**
+1. Apply the migration.
+2. Deploy voice-agent, then voice-session.
+3. Railway staging.
+4. Smoke test.
+5. Switch `VOICE_AGENT_NAME`.

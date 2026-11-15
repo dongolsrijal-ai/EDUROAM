@@ -81,6 +81,14 @@ ENV PATH="/app/.venv/bin:$PATH"
 # This improves security by not running as root
 USER appuser
 
+# Health: the SDK serves GET / on 8081 (200 once registered with LiveKit, 503 while not connected).
+EXPOSE 8081
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3     CMD python -c "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8081/', timeout=4).status == 200 else 1)"
+
+# SIGTERM (redeploy / scale-in) drains: active calls finish, then the worker exits.
+STOPSIGNAL SIGTERM
+
 # Run the application
-# The "start" command tells the worker to connect to LiveKit and begin waiting for jobs.
+# The "start" command tells the worker to connect to LiveKit and begin waiting for jobs
+# (production mode: JSON logs, load-based capacity, health server on 8081).
 CMD ["python", "agent.py", "start"]

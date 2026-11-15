@@ -1,6 +1,8 @@
 # Project tests
 test/
 tests/
+test_*.py
+livekit.builder-backup.toml
 eval/
 evals/
 

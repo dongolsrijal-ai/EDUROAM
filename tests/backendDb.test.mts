@@ -655,3 +655,52 @@ test('FaceTime pairing (one shared line): code -> exactly one call, 5 tries, sin
     await rows('service', 'update public.facetime_calls set ended_at=now() where id=$1', [fourth]);
     await assert.rejects(pair(fourth, hash(555555)), /call not active/);
 });
+
+test('assignments + study tasks: owner-only, class/NPC/document access re-checked for every writer, soft delete', async () =>
+{
+    const insert = (who: Who, sql: string, params: unknown[]) => rows<{ id: string }>(who, sql, params).then((r) => r[0]?.id);
+    const addAssignment = (who: Who, player: string, cls: string | null, extra = '', values: unknown[] = []) =>
+        insert(who, `insert into public.assignments (player_id, class_id, title${extra ? `, ${extra}` : ''}) values ($1, $2, 'Lab report'${values.map((_, i) => `, $${i + 3}`).join('')}) returning id`, [player, cls, ...values]);
+
+    // The student, in their own Biology class, with a confirmed due date and their own private worksheet.
+    const mine = await addAssignment(STUDENT, STUDENT, BIO_CLASS, 'due_at, due_timezone, due_status, source_document_id, npc_id',
+        ['2026-11-20T04:59:00Z', 'America/New_York', 'confirmed', PRIVATE_DOC, BIO_NPC]);
+    assert.ok(mine, 'student creates their own assignment');
+    await assert.rejects(addAssignment(STUDENT, STUDENT, HIST_CLASS), /class not accessible/, 'not in a class the student cannot use');
+    await assert.rejects(addAssignment(STUDENT, TEACHER, BIO_CLASS), /row-level security/, 'not for another player');
+    await assert.rejects(addAssignment(STUDENT, STUDENT, BIO_CLASS, 'npc_id', [HIST_NPC]), /npc does not belong/, 'NPC must be of that class');
+    await assert.rejects(addAssignment(STUDENT, STUDENT, BIO_CLASS, 'due_status', ['confirmed']), /check constraint/, 'a confirmed due date needs a date');
+    // The teacher may not cite the student's private upload; the server (service role) is checked the same way.
+    await assert.rejects(addAssignment('service', TEACHER, BIO_CLASS, 'source_document_id', [PRIVATE_DOC]), /document not accessible/);
+    await assert.rejects(addAssignment('service', OUTSIDER, BIO_CLASS), /class not accessible/, 'server writes are re-checked too');
+
+    // Nobody else sees or changes it.
+    assert.equal((await rows(TEACHER, 'select id from public.assignments')).length, 0, 'the class owner does not see student work');
+    assert.equal((await rows(OUTSIDER, 'select id from public.assignments')).length, 0);
+    assert.equal((await rows(TEACHER, `update public.assignments set status = 'done' where id = $1 returning id`, [mine])).length, 0);
+    assert.equal((await rows(STUDENT, 'select id from public.assignments')).length, 1);
+
+    // Study tasks: must point at the student's own live assignment; class is filled from it.
+    const task = await insert(STUDENT, `insert into public.study_tasks (player_id, assignment_id, title, starts_at) values ($1, $2, 'Draft intro', '2026-11-18T23:00:00Z') returning id`, [STUDENT, mine]);
+    assert.equal((await rows<{ class_id: string }>(STUDENT, 'select class_id from public.study_tasks where id = $1', [task]))[0].class_id, BIO_CLASS);
+    const theirs = await addAssignment('service', TEACHER, HIST_CLASS);
+    await assert.rejects(insert('service', `insert into public.study_tasks (player_id, assignment_id, title) values ($1, $2, 'x') returning id`, [STUDENT, theirs]), /assignment not found/,
+        'a task cannot borrow another player\'s assignment');
+    assert.equal((await rows(TEACHER, 'select id from public.study_tasks')).length, 0);
+
+    // Status edits keep working after leaving the class; soft delete keeps the row.
+    await as('service', (tx) => tx.query('DELETE FROM public.class_members WHERE class_id = $1 AND player_id = $2', [BIO_CLASS, STUDENT]));
+    try
+    {
+        assert.equal((await rows(STUDENT, `update public.assignments set status = 'done' where id = $1 returning id`, [mine])).length, 1, 'status edit after leaving the class');
+        await assert.rejects(rows(STUDENT, 'update public.assignments set npc_id = $2 where id = $1', [mine, BIO_NPC_2]), /class not accessible/, 'but no re-pointing');
+        await rows(STUDENT, 'update public.assignments set deleted_at = now() where id = $1', [mine]);
+        await assert.rejects(insert(STUDENT, `insert into public.study_tasks (player_id, assignment_id, title) values ($1, $2, 'x') returning id`, [STUDENT, mine]), /assignment not found/,
+            'no new tasks for a deleted assignment');
+    }
+    finally { await as('service', (tx) => tx.query('insert into public.class_members (class_id, player_id) values ($1, $2)', [BIO_CLASS, STUDENT])); }
+
+    // Timezone: the student may set their own.
+    await rows(STUDENT, `update public.players set timezone = 'Europe/Berlin' where id = $1`, [STUDENT]);
+    assert.equal((await rows<{ timezone: string }>(STUDENT, 'select timezone from public.players where id = $1', [STUDENT]))[0].timezone, 'Europe/Berlin');
+});

@@ -63,7 +63,7 @@ class BackendError(Exception):
 class Backend:
     """Client for POST /functions/v1/voice-agent (Authorization: Bearer VOICE_AGENT_SECRET)."""
 
-    def __init__(self, url: str, secret: str, apikey: str | None = None, timeout: float = 15.0):
+    def __init__(self, url: str, secret: str, apikey: str | None = None, timeout: float = 8.0):
         if not url or not secret:
             raise ValueError("EDUROAM_VOICE_AGENT_URL and VOICE_AGENT_SECRET must be set")
         self.url = url
@@ -71,13 +71,13 @@ class Backend:
         self._apikey = apikey
         self._timeout = timeout
 
-    def _post(self, body: dict) -> dict:
+    def _post(self, body: dict, timeout: float | None = None) -> dict:
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self._secret}"}
         if self._apikey:
             headers["apikey"] = self._apikey
         request = urllib.request.Request(self.url, data=json.dumps(body).encode(), headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(request, timeout=self._timeout) as response:
+            with urllib.request.urlopen(request, timeout=timeout or self._timeout) as response:
                 return json.loads(response.read() or b"{}")
         except urllib.error.HTTPError as err:
             try:
@@ -85,9 +85,12 @@ class Backend:
             except ValueError:
                 error = {}
             raise BackendError(err.code, error.get("code", "http_error"), error.get("message", f"HTTP {err.code}")) from None
+        except (urllib.error.URLError, TimeoutError, OSError):
+            # Network trouble or a slow backend: a structured error the tool can say out loud.
+            raise BackendError(503, "unavailable", "The EDUROAM server did not answer in time.") from None
 
-    async def call(self, body: dict) -> dict:
-        return await asyncio.to_thread(self._post, body)
+    async def call(self, body: dict, timeout: float | None = None) -> dict:
+        return await asyncio.to_thread(self._post, body, timeout)
 
     async def resolve(self, pairing_id: str) -> dict:
         return await self.call({"action": "resolve", "pairing_id": pairing_id})
@@ -106,6 +109,11 @@ class Backend:
 
     async def call_ended(self, call_id: str) -> dict:
         return await self.call({"action": "call_ended", "call_id": call_id})
+
+    # The tutor's tools (voice-agent actions; the server scopes every one to this session's student).
+    async def tool(self, action: str, pairing_id: str, timeout: float | None = None, **fields) -> dict:
+        body = {"action": action, "pairing_id": pairing_id, **{k: v for k, v in fields.items() if v is not None}}
+        return await self.call(body, timeout)
 
 
 @dataclass
@@ -144,16 +152,67 @@ def camera_line(on: bool) -> str:
             "see it yet and ask them to turn their camera on and point it at the page. Never describe what you cannot see.")
 
 
+TOOLS = """TOOLS (use them; never guess what they would return):
+- search_coursework: the student's uploaded notes, worksheets and class files. Say which document you used. Search again for follow-ups.
+- search_learning_memory: what you studied together before, earlier chat lines, how they like to learn.
+- save_learning_memory: after something meaningful (a topic understood, a misconception fixed). Add a learning preference only if the student agreed to it just now.
+- get_student_progress: mastered and weak topics, recent quiz results.
+- get_assignments: their work for this class with real due dates, plus deadlines found in their files (suggestions to confirm, never facts).
+- save_assignment: add work or update its status. A due date the student did not confirm is saved as a suggestion; never change a confirmed date unless they say so.
+- create_study_plan: propose study sessions from deadlines and weak topics. Nothing is saved until the student agrees.
+- manage_study_tasks: list, add or move study sessions, only with the student's yes.
+- search_public_web: current public information with source links. Keep it separate from their coursework and say where it came from.
+- analyze_camera: call before describing anything you see. If no video is arriving, say so and ask them to turn the camera on.
+- save_session_summary: once, near the end of the call."""
+
+
 def paired_instructions(state: CallState) -> str:
-    """The teacher persona from the backend (same rules as text chat) plus voice/camera specifics."""
+    """The teacher persona from the backend (same rules as text chat) plus the voice tools.
+
+    Static for the whole call: Gemini Live (Gemini API) appends a mid-call instruction update to the
+    conversation as a model turn, so camera state comes from analyze_camera instead.
+    """
     base = (state.context or {}).get("instructions") or LOCKED_INSTRUCTIONS
-    tools = ("TOOLS: get_npc_context (who you are and what you know about this student), search_coursework (their uploaded "
-             "material; say which document you used), get_learning_progress, save_session_summary (call once near the end).")
-    return f"{base}\n\n{tools}\n{camera_line(state.camera_on)}"
+    return f"{base}\n\n{TOOLS}"
+
+
+def cap_output(result: dict, max_chars: int = 3500) -> dict:
+    """Keep tool results short enough for a voice turn: long lists are trimmed, never cut mid-JSON."""
+    text = json.dumps(result, ensure_ascii=False)
+    if len(text) <= max_chars:
+        return result
+    trimmed = dict(result)
+    for key, value in sorted(trimmed.items(), key=lambda kv: -len(json.dumps(kv[1], ensure_ascii=False))):
+        if isinstance(value, list) and len(value) > 1:
+            while len(value) > 1 and len(json.dumps(trimmed, ensure_ascii=False)) > max_chars:
+                value = value[:-1]
+                trimmed[key] = value
+        elif isinstance(value, str) and len(value) > 400:
+            trimmed[key] = value[:400] + "…"
+        if len(json.dumps(trimmed, ensure_ascii=False)) <= max_chars:
+            break
+    trimmed["truncated"] = True
+    return trimmed
 
 
 def locked_instructions(state: CallState) -> str:
-    return f"{LOCKED_INSTRUCTIONS}\n{camera_line(state.camera_on)}"
+    return LOCKED_INSTRUCTIONS
+
+
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+def clean_text(value: object, max_len: int) -> str:
+    """Model-generated tool arguments are untrusted: strings only, no control characters, bounded."""
+    if not isinstance(value, str):
+        return ""
+    return " ".join(_CONTROL.sub(" ", value).split())[:max_len]
+
+
+def clean_list(values: object, max_items: int = 10, max_len: int = 120) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    return [t for t in (clean_text(v, max_len) for v in values) if t][:max_items]
 
 
 def context_digest(context: dict) -> dict:
@@ -164,6 +223,8 @@ def context_digest(context: dict) -> dict:
         "teaching_preferences": context.get("teaching_preferences", []),
         "memory": context.get("memory", {}),
         "coursework_titles": [d.get("title") for d in context.get("coursework", {}).get("documents", [])],
+        "upcoming_work": context.get("upcoming", []),
+        "timezone": context.get("timezone"),
     }
 
 

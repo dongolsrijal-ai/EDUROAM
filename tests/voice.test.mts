@@ -17,8 +17,12 @@ const PAIRING = '50000000-0000-4000-8000-000000000001';
 test('the game can only ASK for a call with an NPC id; nothing else is read from the browser', () =>
 {
     const ok = parseVoiceStart({ action: 'start', npc_id: NPC.toUpperCase(), player_id: 'attacker', room: 'eduroam-x' });
-    assert.deepEqual(ok, { ok: true, value: { npcId: NPC, mode: 'browser' } });
-    assert.deepEqual(parseVoiceStart({ action: 'start', npc_id: NPC, mode: 'facetime' }), { ok: true, value: { npcId: NPC, mode: 'facetime' } });
+    assert.deepEqual(ok, { ok: true, value: { npcId: NPC, mode: 'browser', timezone: null } });
+    assert.deepEqual(parseVoiceStart({ action: 'start', npc_id: NPC, mode: 'facetime' }), { ok: true, value: { npcId: NPC, mode: 'facetime', timezone: null } });
+    const tz = parseVoiceStart({ action: 'start', npc_id: NPC, timezone: 'America/Chicago' });
+    assert.ok(tz.ok && tz.value.timezone === 'America/Chicago', 'a real IANA timezone is kept');
+    const junk = parseVoiceStart({ action: 'start', npc_id: NPC, timezone: "'; drop table--" });
+    assert.ok(junk.ok && junk.value.timezone === null, 'anything else is ignored');
     assert.equal(parseVoiceStart({ action: 'start', npc_id: NPC, mode: 'phone' }).ok, false);
     assert.equal(parseVoiceStart({ action: 'start', npc_id: 'sir-sum' }).ok, false);
     assert.equal(parseVoiceStart({ npc_id: NPC }).ok, false);
@@ -186,4 +190,31 @@ test('the dispatched agent name is a server setting (falls back to the default; 
     assert.equal(voiceAgentName('  '), VOICE_AGENT_NAME);
     assert.equal(voiceAgentName(' eduroam-tutor-code '), 'eduroam-tutor-code');
     assert.equal(voiceAgentName('bad name; drop'), VOICE_AGENT_NAME);
+});
+
+test('tutor tool requests are validated before any query (ids, enums, ranges, approvals)', () =>
+{
+    const req = (body: Record<string, unknown>) => parseAgentRequest({ pairing_id: PAIRING, ...body });
+    // Preferences are written only when the student agreed in this call.
+    const unconfirmed = req({ action: 'memory_save', summary: 'Practised fractions', preference: 'Use pictures' });
+    assert.ok(unconfirmed.ok && unconfirmed.value.action === 'memory_save' && unconfirmed.value.preference === '');
+    const confirmed = req({ action: 'memory_save', preference: 'Use pictures', preference_confirmed: true });
+    assert.ok(confirmed.ok && confirmed.value.action === 'memory_save' && confirmed.value.preference === 'Use pictures');
+    assert.equal(req({ action: 'memory_save' }).ok, false, 'nothing to save');
+    assert.equal(req({ action: 'memory_save', preference: 'x' }).ok, false, 'an unconfirmed preference alone saves nothing');
+
+    const save = req({ action: 'assignment_save', title: 'Essay', due: '2026-11-21 17:00', student_confirmed_due: 'yes', estimated_minutes: '90' });
+    assert.ok(save.ok && save.value.action === 'assignment_save' && save.value.studentConfirmedDue === false && save.value.estimatedMinutes === 90, 'only literal true confirms');
+    assert.equal(req({ action: 'assignment_save', assignment_id: 'a1' }).ok, false, 'ids must be UUIDs');
+    assert.equal(req({ action: 'assignment_save', status: 'graded' }).ok, false);
+    assert.equal(req({ action: 'assignment_save', estimated_minutes: 1 }).ok, false);
+
+    assert.equal(req({ action: 'tasks', op: 'update' }).ok, false, 'update needs a task id');
+    assert.equal(req({ action: 'tasks', op: 'delete' }).ok, false, 'no delete op');
+    const create = req({ action: 'tasks', op: 'create', title: 'Review', starts: '2026-11-18 18:00', minutes: 30, student_approved: true });
+    assert.ok(create.ok && create.value.action === 'tasks' && create.value.studentApproved && create.value.minutes === 30);
+    assert.equal(req({ action: 'study_plan', daily_minutes: 1000 }).ok, false);
+    assert.equal(req({ action: 'web', query: '   ' }).ok, false);
+    assert.equal(req({ action: 'assignments', player_id: 'someone-else' }).ok, true, 'extra ids are ignored, never used');
+    assert.equal(parseAgentRequest({ action: 'assignments' }).ok, false, 'no pairing id, no access');
 });

@@ -24,7 +24,8 @@ from livekit.agents import Agent, AgentServer, AgentSession, ChatContext, JobCon
 from livekit.plugins import google
 
 from eduroam_backend import (
-    Backend, BackendError, CallState, context_digest, fallback_summary, locked_instructions, paired_instructions, parse_metadata,
+    Backend, BackendError, CallState, camera_line, cap_output, clean_list, clean_text, context_digest, fallback_summary, locked_instructions,
+    paired_instructions, parse_metadata,
 )
 
 try:  # local development: agent/.env.local (never committed)
@@ -45,13 +46,28 @@ def backend() -> Backend:
 
 
 class Tutor(Agent):
-    def __init__(self, state: CallState, api: Backend) -> None:
+    """One teacher for one call. Every tool goes through voice-agent with this call's pairing id only:
+    the server decides which student, NPC and class that is, so a tool can never reach anyone else's data."""
+
+    def __init__(self, state: CallState, api: Backend, room: rtc.Room | None = None) -> None:
         self.state = state
         self.api = api
+        self.room = room
         super().__init__(instructions=paired_instructions(state) if state.paired else locked_instructions(state))
 
     async def refresh_instructions(self) -> None:
+        # Only on FaceTime pairing (locked -> teacher). Never per camera change: see paired_instructions.
         await self.update_instructions(paired_instructions(self.state) if self.state.paired else locked_instructions(self.state))
+
+    async def _tool(self, action: str, timeout: float | None = None, **fields) -> dict:
+        """One scoped backend call: locked calls get nothing; errors come back as something sayable."""
+        if not self.state.paired:
+            return {"locked": True, "message": "No EDUROAM code yet. Ask for the 6-digit code first."}
+        try:
+            return cap_output(await self.api.tool(action, self.state.pairing_id, timeout=timeout, **fields))
+        except BackendError as err:
+            logger.warning("tool %s failed: %s", action, err.code)
+            return {"error": err.code, "message": str(err)}
 
     @function_tool()
     async def pair_with_code(self, context: RunContext, code: str) -> str:
@@ -80,34 +96,120 @@ class Tutor(Agent):
 
     @function_tool()
     async def get_npc_context(self, context: RunContext) -> dict:
-        """Who you are (teacher name, subject, class), how this student likes to be taught, and what you remember about them."""
+        """Who you are (teacher name, subject, class), how this student likes to be taught, what you remember, and upcoming work."""
         if not self.state.paired:
             return {"locked": True, "message": "No EDUROAM code yet. Ask for the 6-digit code first."}
         return context_digest(self.state.context or {})
 
     @function_tool()
     async def search_coursework(self, context: RunContext, query: str) -> dict:
-        """Search this student's uploaded coursework for this class (notes, worksheets, textbook pages).
+        """Search this student's uploaded coursework for this class (notes, worksheets, PDFs, DOCX, textbook pages).
 
         Args:
             query: what to look for, e.g. "power rule examples" or "worksheet question 3".
         """
-        if not self.state.paired:
-            return {"locked": True, "message": "No EDUROAM code yet."}
-        try:
-            return await self.api.search(self.state.pairing_id, query)
-        except BackendError as err:
-            return {"error": err.code, "message": "Coursework search is unavailable right now."}
+        return await self._tool("search", query=clean_text(query, 300))
 
     @function_tool()
-    async def get_learning_progress(self, context: RunContext) -> dict:
-        """This student's progress with you: what they studied last, what they mastered and what needs practice."""
-        if not self.state.paired:
-            return {"locked": True, "message": "No EDUROAM code yet."}
-        try:
-            return await self.api.progress(self.state.pairing_id)
-        except BackendError as err:
-            return {"error": err.code}
+    async def search_learning_memory(self, context: RunContext, query: str = "") -> dict:
+        """Recall earlier lessons with this student: summary, topics, learning preferences and matching lines from earlier text chats.
+
+        Args:
+            query: optional topic to look for, e.g. "fractions"; empty for the overview.
+        """
+        return await self._tool("memory_search", query=clean_text(query, 300))
+
+    @function_tool()
+    async def save_learning_memory(self, context: RunContext, summary: str = "", topics: list[str] | None = None,
+                                   mastered: list[str] | None = None, needs_practice: list[str] | None = None,
+                                   preference: str = "", preference_confirmed: bool = False) -> dict:
+        """Remember something meaningful from this conversation (no transcripts, no personal details).
+
+        Args:
+            summary: one or two sentences, e.g. "Fixed the mix-up between mass and weight; solved two problems alone."
+            topics: topics worked on, e.g. ["forces"].
+            mastered: topics the student now clearly understands.
+            needs_practice: topics or misconceptions still to work on.
+            preference: how they like to learn, e.g. "short explanations with an example".
+            preference_confirmed: true only if the student said yes to remembering that preference just now.
+        """
+        return await self._tool("memory_save", summary=clean_text(summary, 1500), topics=clean_list(topics), mastered=clean_list(mastered),
+                                needs_practice=clean_list(needs_practice), preference=clean_text(preference, 120),
+                                preference_confirmed=preference_confirmed is True)
+
+    @function_tool()
+    async def get_student_progress(self, context: RunContext) -> dict:
+        """This student's progress with you: mastered and weak topics, last topic, recent quiz results."""
+        return await self._tool("progress")
+
+    @function_tool()
+    async def get_assignments(self, context: RunContext) -> dict:
+        """The student's assignments for this class (due dates in their own timezone, status), plus deadlines found in their files to confirm."""
+        return await self._tool("assignments")
+
+    @function_tool()
+    async def save_assignment(self, context: RunContext, title: str = "", assignment_id: str = "", description: str = "",
+                              due: str = "", student_confirmed_due: bool = False, status: str = "",
+                              estimated_minutes: int | None = None) -> dict:
+        """Add an assignment or update one from get_assignments.
+
+        Args:
+            title: name of new work, e.g. "Lab report 3" (ignored when updating).
+            assignment_id: the id from get_assignments to update; empty to add new work.
+            description: short description for new work.
+            due: local due time "YYYY-MM-DD HH:MM" (24 h) or "YYYY-MM-DD" (end of day). Only a date the student or a document stated.
+            student_confirmed_due: true only if the student just confirmed exactly this due date.
+            status: "todo", "in_progress" or "done", as the student says.
+            estimated_minutes: how long the student expects it to take.
+        """
+        return await self._tool("assignment_save", assignment_id=assignment_id or None, title=clean_text(title, 160) or None,
+                                description=clean_text(description, 2000) or None, due=due.strip() or None,
+                                student_confirmed_due=student_confirmed_due is True, status=status or None, estimated_minutes=estimated_minutes)
+
+    @function_tool()
+    async def create_study_plan(self, context: RunContext, daily_minutes: int = 60, start_hour: int = 17, days: int = 7) -> dict:
+        """Propose study sessions from deadlines, estimates and weak topics. Nothing is saved.
+
+        Args:
+            daily_minutes: study minutes per day the student wants (15-240).
+            start_hour: local hour they usually start (6-22).
+            days: how many days ahead to plan (1-21).
+        """
+        return await self._tool("study_plan", daily_minutes=daily_minutes, start_hour=start_hour, days=days)
+
+    @function_tool()
+    async def manage_study_tasks(self, context: RunContext, op: str = "list", task_id: str = "", assignment_id: str = "", title: str = "",
+                                 starts: str = "", minutes: int | None = None, status: str = "", student_approved: bool = False) -> dict:
+        """List, add or update the student's study sessions for this class.
+
+        Args:
+            op: "list", "create" or "update".
+            task_id: the id from a previous list, for update.
+            assignment_id: optional assignment this session is for.
+            title: e.g. "Review chapter 4".
+            starts: local start "YYYY-MM-DD HH:MM" (24 h).
+            minutes: length, 5-600.
+            status: "planned", "done", "skipped" or "cancelled".
+            student_approved: true only if the student just agreed to adding or moving this session.
+        """
+        return await self._tool("tasks", op=op, task_id=task_id or None, assignment_id=assignment_id or None, title=clean_text(title, 160) or None,
+                                starts=starts.strip() or None, minutes=minutes, status=status or None, student_approved=student_approved is True)
+
+    @function_tool()
+    async def search_public_web(self, context: RunContext, query: str) -> dict:
+        """Current PUBLIC information from the web with source links (never the student's private data).
+
+        Args:
+            query: a general question, e.g. "When is the 2027 AP Biology exam?"
+        """
+        return await self._tool("web", timeout=15.0, query=clean_text(query, 300))
+
+    @function_tool()
+    async def analyze_camera(self, context: RunContext) -> dict:
+        """Check whether live video from the student is arriving before you describe what you see."""
+        on = receiving_video(self.room) if self.room is not None else False
+        self.state.camera_on = on
+        return {"video": on, "guidance": camera_line(on)}
 
     @function_tool()
     async def save_session_summary(self, context: RunContext, summary: str, topics: list[str]) -> str:
@@ -119,9 +221,9 @@ class Tutor(Agent):
         """
         if not self.state.paired:
             return "Nothing to save: this call was never paired."
-        self.state.topics = [t for t in topics if isinstance(t, str)][:10]
+        self.state.topics = clean_list(topics)
         try:
-            result = await self.api.end(self.state.pairing_id, summary, self.state.topics)
+            result = await self.api.end(self.state.pairing_id, clean_text(summary, 1500), self.state.topics)
         except BackendError as err:
             return f"Could not save ({err.code})."
         self.state.summary_saved = True
@@ -170,7 +272,28 @@ def room_options() -> room_io.RoomOptions:
     return room_io.RoomOptions(video_input=True)
 
 
-server = AgentServer()
+def env_number(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except ValueError:
+        return default
+
+
+# Always-on hosting (Linux container, see agent/DEPLOY.md). Cost / stability limits, all overridable:
+#   MAX_CALL_MINUTES      hard cap on one call (the tutor says goodbye, then the job ends)  default 45
+#   AGENT_IDLE_PROCESSES  warm job processes kept ready                                      default 1
+#   JOB_MEMORY_LIMIT_MB   a job using more is restarted instead of taking the worker down    default 1500
+MAX_CALL_SECONDS = max(60.0, env_number("MAX_CALL_MINUTES", 45) * 60)
+
+server = AgentServer(
+    num_idle_processes=int(env_number("AGENT_IDLE_PROCESSES", 1)),
+    job_memory_warn_mb=1000,
+    job_memory_limit_mb=env_number("JOB_MEMORY_LIMIT_MB", 1500),
+    # Import the Gemini plugin at process start, not on the first call (avoids a stalled first turn).
+    preload_modules=["livekit.plugins.google"],
+    # A redeploy / SIGTERM lets active calls finish (up to 30 min) before the worker exits.
+    drain_timeout=1800,
+)
 
 
 async def on_request(req: JobRequest) -> None:
@@ -199,23 +322,9 @@ async def entrypoint(ctx: JobContext) -> None:
             temperature=0.7,
         ),
     )
-    tutor = Tutor(state, api)
+    tutor = Tutor(state, api, ctx.room)
 
-    async def camera_changed() -> None:
-        on = receiving_video(ctx.room)
-        if on != state.camera_on:
-            state.camera_on = on
-            await tutor.refresh_instructions()
-
-    pending: set[asyncio.Task] = set()
-
-    def schedule_camera_check(*_args) -> None:
-        task = asyncio.create_task(camera_changed())
-        pending.add(task)
-        task.add_done_callback(pending.discard)
-
-    for event in ("track_subscribed", "track_unsubscribed", "track_muted", "track_unmuted"):
-        ctx.room.on(event, schedule_camera_check)
+    # Camera state is read on demand by analyze_camera (no instruction rewrites mid-call).
 
     async def on_shutdown() -> None:
         if state.paired and not state.summary_saved:
@@ -238,7 +347,22 @@ async def entrypoint(ctx: JobContext) -> None:
         room=ctx.room,
         room_options=room_options(),
     )
-    await camera_changed()
+
+    async def end_long_call() -> None:
+        await asyncio.sleep(MAX_CALL_SECONDS)
+        logger.info("call reached MAX_CALL_MINUTES; ending", extra={"room": ctx.room.name})
+        try:
+            await session.generate_reply(instructions="Our time is up for this call. Say a short, warm goodbye and suggest calling again later.")
+            await asyncio.sleep(8)
+        finally:
+            ctx.shutdown(reason="max call length")
+
+    limit = asyncio.create_task(end_long_call(), name="max-call-length")
+
+    async def cancel_limit() -> None:
+        limit.cancel()
+
+    ctx.add_shutdown_callback(cancel_limit)
 
     if state.paired:
         await session.generate_reply(instructions=f"Greet the student as {state.teacher} in one short, warm sentence and ask what they want to work on.")

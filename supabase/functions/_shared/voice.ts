@@ -7,6 +7,7 @@
 // for the context of the session the server created.
 
 import { isUuid, type Parsed } from './validation.ts';
+import { validTimeZone } from './schedule.ts';
 import { mergeLearning, subjectFocus, type MaterialStatus, type RetrievedChunk, type TutorMemory, type TutorNpc, type TutorProgress } from './tutorPrompt.ts';
 
 /** The deployed LiveKit Cloud agent (explicit dispatch by name). */
@@ -47,13 +48,14 @@ export function livekitHttpUrl (url: string)
 const clean = (value: unknown, max: number) => (typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max) : '');
 
 /** Game -> voice-session. mode "browser" = call in the game (LiveKit); "facetime" = a code for the shared Chert line. */
-export function parseVoiceStart (body: unknown): Parsed<{ npcId: string; mode: 'browser' | 'facetime' }>
+export function parseVoiceStart (body: unknown): Parsed<{ npcId: string; mode: 'browser' | 'facetime'; timezone: string | null }>
 {
     const r = body && typeof body === 'object' ? body as Record<string, unknown> : null;
     if (!r || r.action !== 'start') return { ok: false, error: 'action must be "start".' };
     if (!isUuid(r.npc_id)) return { ok: false, error: 'npc_id must be a UUID.' };
     if (r.mode !== undefined && r.mode !== 'browser' && r.mode !== 'facetime') return { ok: false, error: 'mode must be "browser" or "facetime".' };
-    return { ok: true, value: { npcId: r.npc_id.toLowerCase(), mode: r.mode === 'facetime' ? 'facetime' : 'browser' } };
+    // The browser's IANA timezone (deadlines are spoken in the student's local time); invalid = ignored.
+    return { ok: true, value: { npcId: r.npc_id.toLowerCase(), mode: r.mode === 'facetime' ? 'facetime' : 'browser', timezone: validTimeZone(r.timezone) } };
 }
 
 export type AgentRequest =
@@ -62,7 +64,25 @@ export type AgentRequest =
     | { action: 'search'; pairingId: string; query: string }
     | { action: 'progress'; pairingId: string }
     | { action: 'end'; pairingId: string; summary: string; topics: string[] }
-    | { action: 'call_ended'; callId: string };
+    | { action: 'call_ended'; callId: string }
+    | { action: 'memory_search'; pairingId: string; query: string }
+    | { action: 'memory_save'; pairingId: string; summary: string; topics: string[]; mastered: string[]; needsPractice: string[]; preference: string }
+    | { action: 'assignments'; pairingId: string }
+    | { action: 'assignment_save'; pairingId: string; assignmentId: string | null; title?: string; description?: string; due?: string; studentConfirmedDue: boolean; status?: 'todo' | 'in_progress' | 'done'; estimatedMinutes?: number }
+    | { action: 'tasks'; pairingId: string; op: 'list' | 'create' | 'update'; taskId: string | null; assignmentId: string | null; title?: string; starts?: string; minutes?: number; status?: 'planned' | 'done' | 'skipped' | 'cancelled'; studentApproved: boolean }
+    | { action: 'study_plan'; pairingId: string; dailyMinutes?: number; startHour?: number; days?: number }
+    | { action: 'web'; pairingId: string; query: string };
+
+/** Optional integer within [min, max]; undefined if absent; null if present but invalid. */
+function intIn (value: unknown, min: number, max: number): number | undefined | null
+{
+    if (value === undefined || value === null || value === '') return undefined;
+    const n = typeof value === 'string' ? Number(value) : value;
+    return typeof n === 'number' && Number.isInteger(n) && n >= min && n <= max ? n : null;
+}
+const topicList = (value: unknown) => (Array.isArray(value) ? value : []).map((t) => clean(t, LIMITS.topic)).filter(Boolean).slice(0, LIMITS.topics);
+const optionalText = (value: unknown, max: number) => (value === undefined || value === null ? undefined : clean(value, max));
+const optionalUuid = (value: unknown): string | null | false => (value === undefined || value === null || value === '' ? null : isUuid(value) ? value.toLowerCase() : false);
 
 /** LiveKit agent -> voice-agent. Only a pairing id identifies the session. */
 export function parseAgentRequest (body: unknown): Parsed<AgentRequest>
@@ -93,13 +113,68 @@ export function parseAgentRequest (body: unknown): Parsed<AgentRequest>
         }
         case 'progress':
             return { ok: true, value: { action: 'progress', pairingId } };
+        case 'assignments':
+            return { ok: true, value: { action: 'assignments', pairingId } };
+        case 'memory_search':
+            return { ok: true, value: { action: 'memory_search', pairingId, query: clean(r.query, LIMITS.query) } };
+        case 'memory_save':
+        {
+            // A learning preference is written only when the student agreed to it in this call.
+            const preference = r.preference_confirmed === true ? clean(r.preference, LIMITS.topic) : '';
+            const value = { action: 'memory_save' as const, pairingId, summary: clean(r.summary, LIMITS.summary), topics: topicList(r.topics), mastered: topicList(r.mastered), needsPractice: topicList(r.needs_practice), preference };
+            if (!value.summary && !value.topics.length && !value.mastered.length && !value.needsPractice.length && !value.preference) return { ok: false, error: 'Nothing to save.' };
+            return { ok: true, value };
+        }
+        case 'web':
+        {
+            const query = clean(r.query, LIMITS.query);
+            if (!query) return { ok: false, error: 'query is empty.' };
+            return { ok: true, value: { action: 'web', pairingId, query } };
+        }
+        case 'assignment_save':
+        {
+            const assignmentId = optionalUuid(r.assignment_id);
+            if (assignmentId === false) return { ok: false, error: 'assignment_id must be a UUID from get_assignments.' };
+            const estimatedMinutes = intIn(r.estimated_minutes, 5, 6000);
+            if (estimatedMinutes === null) return { ok: false, error: 'estimated_minutes must be a whole number from 5 to 6000.' };
+            if (r.status !== undefined && r.status !== null && !['todo', 'in_progress', 'done'].includes(String(r.status))) return { ok: false, error: 'status must be todo, in_progress or done.' };
+            return { ok: true, value: {
+                action: 'assignment_save', pairingId, assignmentId, title: optionalText(r.title, 160), description: optionalText(r.description, 2000),
+                due: optionalText(r.due, 16) || undefined, studentConfirmedDue: r.student_confirmed_due === true,
+                status: r.status ? String(r.status) as 'todo' | 'in_progress' | 'done' : undefined, estimatedMinutes,
+            } };
+        }
+        case 'tasks':
+        {
+            const op = r.op === 'create' || r.op === 'update' ? r.op : r.op === undefined || r.op === 'list' ? 'list' : null;
+            if (!op) return { ok: false, error: 'op must be list, create or update.' };
+            const taskId = optionalUuid(r.task_id);
+            const assignmentId = optionalUuid(r.assignment_id);
+            if (taskId === false || assignmentId === false) return { ok: false, error: 'task_id / assignment_id must be UUIDs from earlier results.' };
+            if (op === 'update' && !taskId) return { ok: false, error: 'update needs task_id.' };
+            const minutes = intIn(r.minutes, 5, 600);
+            if (minutes === null) return { ok: false, error: 'minutes must be 5-600.' };
+            if (r.status !== undefined && r.status !== null && !['planned', 'done', 'skipped', 'cancelled'].includes(String(r.status))) return { ok: false, error: 'status must be planned, done, skipped or cancelled.' };
+            return { ok: true, value: {
+                action: 'tasks', pairingId, op, taskId, assignmentId, title: optionalText(r.title, 160), starts: optionalText(r.starts, 16) || undefined, minutes,
+                status: r.status ? String(r.status) as 'planned' | 'done' | 'skipped' | 'cancelled' : undefined, studentApproved: r.student_approved === true,
+            } };
+        }
+        case 'study_plan':
+        {
+            const dailyMinutes = intIn(r.daily_minutes, 15, 240);
+            const startHour = intIn(r.start_hour, 6, 22);
+            const days = intIn(r.days, 1, 21);
+            if (dailyMinutes === null || startHour === null || days === null) return { ok: false, error: 'daily_minutes 15-240, start_hour 6-22, days 1-21.' };
+            return { ok: true, value: { action: 'study_plan', pairingId, dailyMinutes, startHour, days } };
+        }
         case 'end':
         {
             const topics = (Array.isArray(r.topics) ? r.topics : []).map((t) => clean(t, LIMITS.topic)).filter(Boolean).slice(0, LIMITS.topics);
             return { ok: true, value: { action: 'end', pairingId, summary: clean(r.summary, LIMITS.summary), topics } };
         }
         default:
-            return { ok: false, error: 'action must be "resolve", "pair", "search", "progress", "end" or "call_ended".' };
+            return { ok: false, error: 'unknown action.' };
     }
 }
 
@@ -199,7 +274,7 @@ const bullet = (items: string[]) => (items.length ? items.map((item) => `- ${ite
  * Voice system instructions for the agent: the same teacher, rules and memory as text chat,
  * phrased for speech. The agent may use them as-is or merge them into its own prompt.
  */
-export function buildVoiceInstructions (npc: TutorNpc, memory: TutorMemory, progress: TutorProgress, materials: string[])
+export function buildVoiceInstructions (npc: TutorNpc, memory: TutorMemory, progress: TutorProgress, materials: string[], upcoming: string[] = [])
 {
     return [
         `You are ${npc.name}, a warm, patient ${npc.subject} tutor, talking with one student on a voice call. Class: ${npc.className}.`,
@@ -213,7 +288,7 @@ export function buildVoiceInstructions (npc: TutorNpc, memory: TutorMemory, prog
         '- For questions about their uploaded notes, homework or worksheets, use the search_coursework tool and say which document you used. Never invent what a document says.',
         '- If search_coursework finds nothing that answers the question, say you could not find it in their uploaded material for this class, then offer to help from general knowledge. If a file is still processing, say it is not ready yet.',
         '- Earlier topics and practice lists are background only: never steer the student back to them unless asked.',
-        '- Camera: when the student shows a worksheet, equation, graph or diagram, first say briefly what you see (for example "I can see three quarters plus one quarter"), then guide them step by step. If it is blurry, cut off, too dark or too far away, ask them to hold it closer and steady. Never guess at writing you cannot read, and never claim to see anything when no camera image is coming in.',
+        '- Camera: before describing anything you see, call analyze_camera to check that live video is arriving. When the student shows a worksheet, equation, graph or diagram, first say briefly what you see (for example "I can see three quarters plus one quarter"), then guide them step by step. If it is blurry, cut off, too dark or too far away, ask them to hold it closer and steady. Never guess at writing you cannot read, and never claim to see anything when no camera image is coming in.',
         '- At the end of the call, call save_session_summary with one or two sentences: what was practised, where they struggled, what they got right. No personal details.',
         `- Subject teaching style: ${subjectFocus(npc.subject)}`,
         '',
@@ -222,6 +297,7 @@ export function buildVoiceInstructions (npc: TutorNpc, memory: TutorMemory, prog
         `Last topic studied: ${memory.currentTopic || '(none yet)'}`,
         `Could use practice (mention only if asked):\n${bullet(progress.topicsNeedingPractice)}`,
         `Their coursework for this class:\n${bullet(materials)}`,
+        `Their upcoming work for this class (mention a close deadline once, early, and offer help; never invent dates):\n${bullet(upcoming)}`,
     ].filter((line) => line !== null).join('\n').replace(/\n{3,}/g, '\n\n');
 }
 

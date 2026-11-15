@@ -33,6 +33,12 @@ serve(async (req) =>
     await rateLimit(admin, userId, 'voice:day', 30, 86_400);
     // RLS-scoped lookup: only an NPC this student may use is found at all.
     const npc = await resolveNpcIdentity(db, userId, parsed.value.npcId);
+    // The student's timezone, for deadlines spoken in local time (best effort; never blocks a call).
+    if (parsed.value.timezone)
+    {
+        const { error: tzError } = await admin.from('players').update({ timezone: parsed.value.timezone }).eq('id', userId);
+        if (tzError) console.warn('[voice-session] timezone not saved', tzError.code);
+    }
 
     if (parsed.value.mode === 'facetime')
     {

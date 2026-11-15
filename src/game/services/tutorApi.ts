@@ -595,10 +595,17 @@ export interface VoiceCall
  * NPC, creates the single-use pairing and dispatches the tutor agent; the browser only gets
  * a join token (never the pairing id or any LiveKit secret).
  */
+/** The browser's IANA timezone, so the tutor speaks deadlines in the student's local time. */
+function browserTimezone (): string | undefined
+{
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined; }
+    catch { return undefined; }
+}
+
 export async function startVoiceCall (npc: RemoteNpc): Promise<VoiceCall>
 {
     await requireUserId();
-    const data = await invoke<{ room: string; server_url: string; token: string; npc: { name: string } }>('voice-session', { action: 'start', npc_id: npc.id });
+    const data = await invoke<{ room: string; server_url: string; token: string; npc: { name: string } }>('voice-session', { action: 'start', npc_id: npc.id, timezone: browserTimezone() });
     return { room: data.room, serverUrl: data.server_url, token: data.token, npcName: data.npc.name };
 }
 
@@ -617,6 +624,6 @@ export interface FaceTimePairing
 export async function startFaceTimeCall (npc: RemoteNpc): Promise<FaceTimePairing>
 {
     await requireUserId();
-    const data = await invoke<{ code: string; expires_at: string; line: string; line_busy: boolean; npc: { name: string } }>('voice-session', { action: 'start', npc_id: npc.id, mode: 'facetime' });
+    const data = await invoke<{ code: string; expires_at: string; line: string; line_busy: boolean; npc: { name: string } }>('voice-session', { action: 'start', npc_id: npc.id, mode: 'facetime', timezone: browserTimezone() });
     return { code: data.code, expiresAt: Date.parse(data.expires_at), line: data.line, lineBusy: data.line_busy, npcName: data.npc.name };
 }

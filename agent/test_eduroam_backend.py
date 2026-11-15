@@ -78,11 +78,26 @@ class InstructionTests(unittest.TestCase):
         state = CallState(dispatch=Dispatch(call_id=CALL), pairing_id=PAIRING, context=CONTEXT)
         self.assertTrue(state.paired)
         self.assertEqual(state.teacher, "Professor Maple")
-        self.assertIn("You are Professor Maple", paired_instructions(state))
-        self.assertIn("no video is being received", paired_instructions(state))
+        text = paired_instructions(state)
+        self.assertIn("You are Professor Maple", text)
+        self.assertIn("analyze_camera: call before describing anything you see", text)
+        # Static for the whole call (Gemini Live would append any update as a model turn).
         state.camera_on = True
-        self.assertIn("live video", paired_instructions(state))
+        self.assertEqual(paired_instructions(state), text)
         self.assertIn("cannot see", camera_line(False))
+        self.assertIn("live video", camera_line(True))
+
+    def test_untrusted_tool_arguments_are_cleaned_and_outputs_capped(self):
+        from eduroam_backend import cap_output, clean_list, clean_text
+        self.assertEqual(clean_text("  a\x00b\n c  ", 10), "a b c")
+        self.assertEqual(clean_text(42, 10), "")
+        self.assertEqual(clean_list(["x", 3, "", "y" * 500], max_len=5), ["x", "yyyyy"])
+        self.assertEqual(clean_list("not a list"), [])
+        big = {"results": [{"text": "z" * 500} for _ in range(40)], "note": "keep"}
+        capped = cap_output(big, 2000)
+        self.assertTrue(capped["truncated"] and 0 < len(capped["results"]) < 40 and capped["note"] == "keep")
+        self.assertLessEqual(len(__import__("json").dumps(capped)), 2100)
+        self.assertEqual(cap_output({"a": 1}), {"a": 1})
 
     def test_context_digest_has_no_ids(self):
         digest = context_digest(CONTEXT)
