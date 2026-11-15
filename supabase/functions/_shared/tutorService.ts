@@ -25,8 +25,9 @@ import {
 import { tutoringTask, wantsWebSearch } from './tutorRouting.ts';
 import { readWebPage, referencedUrls, websiteNotesText } from './website.ts';
 
-/** Google Search is billed / quota-limited separately: a small per-student budget. */
-export const SEARCH_LIMITS = { perMinute: 3, perDay: 25 } as const;
+// Google Search budget per student, shared by text chat and the voice tutor (defined in tutorPrompt.ts).
+import { SEARCH_LIMITS } from './tutorPrompt.ts';
+export { SEARCH_LIMITS };
 /** Links read in chat (URL context): bounded the same way. */
 export const PAGE_LIMITS = { perMessage: 2, perMinute: 4, perDay: 40 } as const;
 /** Output budget for one tutoring turn (the old 1200 truncated long answers / medium thinking). */

@@ -9,8 +9,7 @@ import { HttpError, withinRateLimit } from './http.ts';
 import { npcDocumentScope, retrieveStudentMemory, type NpcIdentity } from './npcContext.ts';
 import { assignmentChange, DEFAULT_TIMEZONE, dueLabel, extractDeadlines, formatLocal, parseLocalDue, planStudy, type AssignmentRow } from './schedule.ts';
 import { DEFAULT_GEMINI_MODEL, generateStructuredResult, type GenerateContentClient } from './gemini.ts';
-import { mergeLearning, webSourcesFrom } from './tutorPrompt.ts';
-import { SEARCH_LIMITS } from './tutorService.ts';
+import { mergeLearning, SEARCH_LIMITS, webSourcesFrom } from './tutorPrompt.ts';
 import type { AgentRequest } from './voice.ts';
 
 export interface ToolContext

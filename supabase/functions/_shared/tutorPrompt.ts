@@ -517,3 +517,6 @@ export function mergeLearning (memory: TutorMemory, progress: TutorProgress, upd
         },
     };
 }
+
+/** Google Search is billed / quota-limited separately: a small per-student budget (text chat + voice). */
+export const SEARCH_LIMITS = { perMinute: 3, perDay: 25 } as const;
