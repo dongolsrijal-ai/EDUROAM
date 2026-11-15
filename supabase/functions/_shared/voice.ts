@@ -65,6 +65,7 @@ export type AgentRequest =
     | { action: 'progress'; pairingId: string }
     | { action: 'end'; pairingId: string; summary: string; topics: string[] }
     | { action: 'call_ended'; callId: string }
+    | { action: 'facetime_open'; chertCallId: string }
     | { action: 'memory_search'; pairingId: string; query: string }
     | { action: 'memory_save'; pairingId: string; summary: string; topics: string[]; mastered: string[]; needsPractice: string[]; preference: string }
     | { action: 'assignments'; pairingId: string }
@@ -89,6 +90,13 @@ export function parseAgentRequest (body: unknown): Parsed<AgentRequest>
 {
     const r = body && typeof body === 'object' ? body as Record<string, unknown> : null;
     if (!r) return { ok: false, error: 'Expected a JSON object.' };
+    // chert dev (shared line): the agent registers the caller's Chert call id, then pairs it by code.
+    if (r.action === 'facetime_open')
+    {
+        const id = typeof r.chert_call_id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(r.chert_call_id) ? r.chert_call_id : '';
+        if (!id) return { ok: false, error: 'chert_call_id must be the id from the chert-bridge-<id> participant.' };
+        return { ok: true, value: { action: 'facetime_open', chertCallId: id } };
+    }
     // FaceTime calls start without a pairing: they name the call (from dispatch metadata) instead.
     if (r.action === 'pair' || r.action === 'call_ended')
     {

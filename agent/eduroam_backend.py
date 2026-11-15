@@ -28,10 +28,12 @@ class Dispatch:
 
     pairing_id: str | None = None
     call_id: str | None = None
+    # A room prepared by `chert dev` (shared FaceTime line): the caller joins later as chert-bridge-<id>.
+    chert: bool = False
 
     @property
     def facetime(self) -> bool:
-        return self.call_id is not None
+        return self.call_id is not None or self.chert
 
 
 def parse_metadata(metadata: str | None) -> Dispatch:
@@ -44,6 +46,9 @@ def parse_metadata(metadata: str | None) -> Dispatch:
     except ValueError:
         data = None
     if isinstance(data, dict):
+        # chert dev: {"chert_warm": true} before any call, {"chert_call": "<id>", "media": ...} for a call.
+        if data.get("chert_warm") is True or isinstance(data.get("chert_call"), str):
+            return Dispatch(chert=True)
         call = data.get("facetime_call")
         if isinstance(call, str) and UUID.match(call):
             return Dispatch(call_id=call.lower())
@@ -51,6 +56,26 @@ def parse_metadata(metadata: str | None) -> Dispatch:
         if isinstance(pairing, str) and UUID.match(pairing):
             return Dispatch(pairing_id=pairing.lower())
     return Dispatch()
+
+
+CHERT_BRIDGE_PREFIX = "chert-bridge-"
+_CHERT_CALL = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def chert_call_id(identity: str | None) -> str | None:
+    """The Chert call id of the FaceTime caller's participant (chert-bridge-<call id>), else None."""
+    if not identity or not identity.startswith(CHERT_BRIDGE_PREFIX):
+        return None
+    call = identity[len(CHERT_BRIDGE_PREFIX):]
+    return call if _CHERT_CALL.match(call) else None
+
+
+def bridge_ready(metadata: str | None) -> bool:
+    """chert dev's room signal that FaceTime audio is connected: greet within 10 s of it, never before."""
+    try:
+        return json.loads(metadata or "{}").get("chert_bridge_ready") is True
+    except (ValueError, AttributeError):
+        return False
 
 
 class BackendError(Exception):
@@ -106,6 +131,10 @@ class Backend:
 
     async def end(self, pairing_id: str, summary: str, topics: list[str]) -> dict:
         return await self.call({"action": "end", "pairing_id": pairing_id, "summary": summary, "topics": topics})
+
+    async def facetime_open(self, chert_call: str) -> dict:
+        """Registers a chert dev FaceTime call so the caller can pair with their 6-digit code."""
+        return await self.call({"action": "facetime_open", "chert_call_id": chert_call})
 
     async def call_ended(self, call_id: str) -> dict:
         return await self.call({"action": "call_ended", "call_id": call_id})

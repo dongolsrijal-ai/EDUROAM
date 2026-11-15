@@ -218,3 +218,11 @@ test('tutor tool requests are validated before any query (ids, enums, ranges, ap
     assert.equal(req({ action: 'assignments', player_id: 'someone-else' }).ok, true, 'extra ids are ignored, never used');
     assert.equal(parseAgentRequest({ action: 'assignments' }).ok, false, 'no pairing id, no access');
 });
+
+test('chert dev calls are registered by their Chert call id only (validated), before code pairing', () =>
+{
+    assert.deepEqual(parseAgentRequest({ action: 'facetime_open', chert_call_id: 'op_7f3K-9' }), { ok: true, value: { action: 'facetime_open', chertCallId: 'op_7f3K-9' } });
+    assert.equal(parseAgentRequest({ action: 'facetime_open', chert_call_id: 'bad id;drop' }).ok, false);
+    assert.equal(parseAgentRequest({ action: 'facetime_open' }).ok, false);
+    assert.equal(parseAgentRequest({ action: 'facetime_open', chert_call_id: 'x'.repeat(129) }).ok, false);
+});

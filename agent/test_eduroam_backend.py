@@ -7,6 +7,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from eduroam_backend import (
+    bridge_ready, chert_call_id,
     Backend, BackendError, CallState, Dispatch, LOCKED_INSTRUCTIONS, camera_line, context_digest, fallback_summary,
     locked_instructions, paired_instructions, parse_metadata,
 )
@@ -163,3 +164,30 @@ class BackendTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ChertTests(unittest.TestCase):
+    """chert dev (shared FaceTime line): warm rooms, the caller's bridge identity, the greeting signal."""
+
+    def test_chert_rooms_are_facetime_calls_without_a_student(self):
+        for meta in ('{"chert_warm":true}', '{"chert_call":"abc_123","media":{"video":true}}'):
+            d = parse_metadata(meta)
+            self.assertTrue(d.chert and d.facetime)
+            self.assertIsNone(d.pairing_id)
+            self.assertIsNone(d.call_id, "the call is registered later, from the bridge participant")
+        self.assertFalse(parse_metadata('{"chert_warm":"yes"}').chert)
+        self.assertFalse(parse_metadata(PAIRING).chert)
+
+    def test_bridge_identity_names_the_call(self):
+        self.assertEqual(chert_call_id("chert-bridge-op_7f3K-9"), "op_7f3K-9")
+        self.assertIsNone(chert_call_id("student-123"))
+        self.assertIsNone(chert_call_id("chert-bridge-"))
+        self.assertIsNone(chert_call_id("chert-bridge-bad id;drop"))
+        self.assertIsNone(chert_call_id(None))
+
+    def test_greeting_waits_for_bridge_ready(self):
+        self.assertFalse(bridge_ready('{"chert_warm":true}'))
+        self.assertFalse(bridge_ready('{"chert_call":"x"}'))
+        self.assertTrue(bridge_ready('{"chert_call":"x","chert_bridge_ready":true,"at":"2026-11-15T10:00:00Z"}'))
+        self.assertFalse(bridge_ready("not json"))
+        self.assertFalse(bridge_ready(None))

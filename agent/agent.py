@@ -24,8 +24,8 @@ from livekit.agents import Agent, AgentServer, AgentSession, ChatContext, JobCon
 from livekit.plugins import google
 
 from eduroam_backend import (
-    Backend, BackendError, CallState, camera_line, cap_output, clean_list, clean_text, context_digest, fallback_summary, locked_instructions,
-    paired_instructions, parse_metadata,
+    Backend, BackendError, CallState, bridge_ready, camera_line, cap_output, chert_call_id, clean_list, clean_text, context_digest,
+    fallback_summary, locked_instructions, paired_instructions, parse_metadata,
 )
 
 try:  # local development: agent/.env.local (never committed)
@@ -267,9 +267,24 @@ def receiving_video(room: rtc.Room) -> bool:
     )
 
 
-def room_options() -> room_io.RoomOptions:
+def room_options(participant_identity: str | None = None) -> room_io.RoomOptions:
     # Gemini Live samples the newest video track (~1 frame/s while the student speaks, 1 per 3 s otherwise).
+    # On FaceTime (chert dev) audio and camera come only from the caller's bridge participant.
+    if participant_identity:
+        return room_io.RoomOptions(video_input=True, participant_identity=participant_identity)
     return room_io.RoomOptions(video_input=True)
+
+
+async def wait_for_chert_caller(ctx: JobContext) -> rtc.RemoteParticipant | None:
+    """chert dev keeps a warm room with this agent in it before any call. Join it, open no paid model
+    session, and wait for the FaceTime caller (chert-bridge-<call id>). Anyone else is ignored."""
+    await ctx.connect()
+    while True:
+        participant = await ctx.wait_for_participant()
+        if chert_call_id(participant.identity):
+            return participant
+        logger.warning("ignoring non-Chert participant in a Chert room")
+        await asyncio.sleep(0.5)
 
 
 def env_number(name: str, default: float) -> float:
@@ -342,10 +357,22 @@ async def entrypoint(ctx: JobContext) -> None:
 
     ctx.add_shutdown_callback(on_shutdown)
 
+    caller_identity = None
+    if state.dispatch.chert:
+        caller = await wait_for_chert_caller(ctx)
+        caller_identity = caller.identity
+        try:
+            # Record the FaceTime call so the caller can pair with the 6-digit code from EDUROAM.
+            opened = await api.facetime_open(chert_call_id(caller.identity))
+            state.dispatch.call_id = opened["call_id"]
+        except BackendError as err:
+            logger.warning("facetime call not registered: %s", err.code)
+        logger.info("FaceTime caller joined", extra={"room": ctx.room.name})
+
     await session.start(
         agent=tutor,
         room=ctx.room,
-        room_options=room_options(),
+        room_options=room_options(caller_identity),
     )
 
     async def end_long_call() -> None:
@@ -364,7 +391,23 @@ async def entrypoint(ctx: JobContext) -> None:
 
     ctx.add_shutdown_callback(cancel_limit)
 
-    if state.paired:
+    if state.dispatch.chert:
+        # Greet once, on chert dev's bridge_ready room signal (the Mac ends a call silent for 10 s after it).
+        greeted = asyncio.Event()
+        greeting: list[asyncio.Task] = []
+
+        def greet_if_ready(*_args) -> None:
+            if greeted.is_set() or not bridge_ready(ctx.room.metadata):
+                return
+            greeted.set()
+            text = ("Greet the caller warmly in one short sentence as their EDUROAM tutor and ask for the 6-digit FaceTime code "
+                    "shown in EDUROAM." if state.dispatch.call_id else
+                    "Say kindly that the EDUROAM line cannot take calls right now and ask them to try again in a minute.")
+            greeting.append(asyncio.create_task(session.generate_reply(instructions=text)))
+
+        ctx.room.on("room_metadata_changed", greet_if_ready)
+        greet_if_ready()
+    elif state.paired:
         await session.generate_reply(instructions=f"Greet the student as {state.teacher} in one short, warm sentence and ask what they want to work on.")
     elif state.dispatch.facetime:
         await session.generate_reply(instructions="Greet the caller and ask for their 6-digit EDUROAM FaceTime code.")

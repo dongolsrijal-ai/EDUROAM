@@ -7,6 +7,7 @@
 //   pair     { call_id, code }              -> FaceTime: the 6-digit code the caller said, for this call
 //                                              (max 5 tries); on success the same context + pairing_id
 //   call_ended { call_id }                  -> FaceTime call over: frees the shared line
+//   facetime_open { chert_call_id }        -> chert dev call (shared line): registers it for code pairing
 //   ...then, for a claimed and unexpired session only (the tutor's tools, see _shared/tutorTools.ts):
 //   search { query }                        -> coursework excerpts (this class + the student's own uploads)
 //   progress                                -> mastered / weak topics + recent quiz results
@@ -99,6 +100,20 @@ serve(async (req) =>
         const row = (Array.isArray(data) ? data[0] : data) as { session_id: string | null; player_id: string; npc_id: string; room_name: string; attempts_left: number } | undefined;
         if (!row?.session_id) return json(200, { paired: false, attempts_left: Math.max(0, row?.attempts_left ?? 0) });
         return json(200, { paired: true, pairing_id: row.session_id, ...(await sessionContext(admin, row.player_id, row.npc_id, row.room_name)) });
+    }
+
+    if (request.action === 'facetime_open')
+    {
+        // A call on the shared Chert line (chert dev): record it once, so it can be paired by code.
+        // room_name is a synthetic eduroam-ft-<uuid> (chert dev names its own rooms); nothing routes by it.
+        const { data: existing, error: findError } = await admin.from('facetime_calls').select('id, ended_at').eq('chert_call_id', request.chertCallId).maybeSingle();
+        if (findError) throw new Error(findError.message);
+        if (existing?.ended_at) throw new HttpError(409, 'call_ended', 'This FaceTime call already ended.');
+        if (existing) return json(200, { call_id: existing.id });
+        const { data: opened, error: openError } = await admin.from('facetime_calls')
+            .insert({ chert_call_id: request.chertCallId, room_name: `eduroam-ft-${crypto.randomUUID()}` }).select('id').single();
+        if (openError) throw new Error(openError.message);
+        return json(201, { call_id: opened.id });
     }
 
     if (request.action === 'call_ended')
