@@ -248,6 +248,63 @@ export function searchResponse (materials: MaterialStatus[], chunks: RetrievedCh
     };
 }
 
+// ------------------------------------------------------------------ LiveKit Builder metadata
+
+/** Per-field caps (characters) for the Builder agent's dispatch metadata; the whole JSON stays small. */
+export const BUILDER_LIMITS = { npc_name: 80, subject: 120, personality: 600, teaching_style: 800, coursework: 2000, learning_memory: 1200 } as const;
+export type BuilderMetadata = Record<keyof typeof BUILDER_LIMITS, string>;
+
+const cap = (text: string, max: number) => (text.length <= max ? text : `${text.slice(0, max - 1).trimEnd()}…`);
+const list = (items: string[], max = 6) => items.map((item) => clean(item, 80)).filter(Boolean).slice(0, max).join(', ');
+
+/**
+ * The six fields the hosted Agent Builder agent "eduroam-tutor" registers as metadata variables
+ * ({{metadata.npc_name}} ...), filled from THIS student's authorised Supabase data: the NPC, its
+ * class material (titles + short excerpts, the student's own private uploads included) and the
+ * student's own memory/progress with that NPC. No ids, tokens or other students' data.
+ */
+export function builderMetadata (npc: TutorNpc, memory: TutorMemory, progress: TutorProgress, materials: MaterialStatus[], chunks: RetrievedChunk[]): BuilderMetadata
+{
+    const subject = clean(npc.subject, BUILDER_LIMITS.subject) || clean(npc.className, BUILDER_LIMITS.subject) || 'General studies';
+    const name = clean(npc.name, BUILDER_LIMITS.npc_name) || 'your EDUROAM teacher';
+
+    const documents = materials.slice(0, 8).map((m) => (m.status === 'ready' ? clean(m.title, 80) : `${clean(m.title, 80)} (still processing, not readable yet)`));
+    const excerpts = chunks.slice(0, 3).map((c) => `[${clean(c.title, 80)}${c.pageStart ? `, p. ${c.pageStart}` : ''}] ${clean(c.text, 320)}`);
+    const coursework = documents.length
+        ? [`Class: ${clean(npc.className, 80) || subject}.`, `Documents: ${documents.join('; ')}.`, excerpts.length ? `Excerpts: ${excerpts.join(' ')}` : 'No readable excerpts yet.',
+            'Only quote what these excerpts say; name the document you use; never invent document contents.'].join(' ')
+        : `Class: ${clean(npc.className, 80) || subject}. No coursework has been uploaded for this class yet. Do not invent document contents; teach from general ${subject} knowledge.`;
+
+    const parts = [
+        memory.summary && `Summary: ${clean(memory.summary, 500)}`,
+        memory.currentTopic && `Current topic: ${clean(memory.currentTopic, 120)}`,
+        memory.topicsStudied.length && `Topics studied: ${list(memory.topicsStudied)}`,
+        progress.topicsMastered.length && `Strengths: ${list(progress.topicsMastered)}`,
+        progress.topicsNeedingPractice.length && `Needs practice (mention only if asked): ${list(progress.topicsNeedingPractice)}`,
+        memory.learningPreferences.length && `How they like to learn: ${list(memory.learningPreferences, 5)}`,
+    ].filter(Boolean) as string[];
+
+    return {
+        npc_name: name,
+        subject,
+        personality: cap(clean(npc.personality, 2000) || `A warm, patient, encouraging ${subject} teacher.`, BUILDER_LIMITS.personality),
+        teaching_style: cap(clean(npc.teachingInstructions, 2000)
+            || `Explain step by step in short spoken sentences, check understanding with a quick question, and give hints before full answers. ${subjectFocus(npc.subject)}`, BUILDER_LIMITS.teaching_style),
+        coursework: cap(coursework, BUILDER_LIMITS.coursework),
+        learning_memory: cap(parts.length ? `${parts.join('. ')}.` : 'First conversation with this student: no saved memory yet.', BUILDER_LIMITS.learning_memory),
+    };
+}
+
+/**
+ * Dispatch metadata for the configured agent: the hosted Builder agent (default name) gets the
+ * six JSON fields; any other agent name (the self-hosted Python worker, e.g. "eduroam-tutor-code")
+ * keeps the original opaque pairing id, which it trades at voice-agent.
+ */
+export function usesBuilderMetadata (agentName: string)
+{
+    return agentName === VOICE_AGENT_NAME;
+}
+
 /**
  * The end-of-call learning summary merged into the student's NPC memory (the same merge text
  * chat uses): a non-empty summary replaces the old one, topics are added, preferences kept.

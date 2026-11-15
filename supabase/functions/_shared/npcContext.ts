@@ -7,6 +7,7 @@
 
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2.119.0';
 import { HttpError } from './http.ts';
+import { builderMetadata, type BuilderMetadata } from './voice.ts';
 import type {
     AttachmentContext, Channel, HistoryTurn, MaterialStatus, RetrievedChunk, SourceRef, TutorMemory, TutorNpc, TutorProgress, WebPageRef, WebSourceRef,
 } from './tutorPrompt.ts';
@@ -208,4 +209,16 @@ export async function loadAttachments (db: SupabaseClient, playerId: string, npc
         budget -= text.length;
         return { documentId: id, title: doc.title, status: text ? 'ready' as const : 'unavailable' as const, text };
     });
+}
+
+/**
+ * The hosted LiveKit Agent Builder agent's six metadata fields for one authorised student + NPC
+ * (voice-session). Same helpers as text chat: this student's memory and progress, this class's
+ * material plus the student's own private uploads, never anyone else's.
+ */
+export async function loadBuilderMetadata (db: SupabaseClient, playerId: string, npc: NpcIdentity): Promise<BuilderMetadata>
+{
+    const { memory, progress } = await retrieveStudentMemory(db, playerId, npc);
+    const knowledge = await loadClassKnowledge(db, playerId, npc, memory.currentTopic || npc.subject, 3);
+    return builderMetadata(npc, memory, progress, knowledge.materials, knowledge.chunks);
 }

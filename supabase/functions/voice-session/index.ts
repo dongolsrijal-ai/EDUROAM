@@ -8,14 +8,18 @@
 // 1. authenticate the student (JWT; the player id comes only from here)
 // 2. authorise the NPC (owner or class member; a foreign NPC is a 404)
 // 3. create a short-lived single-use pairing + unique room (create_voice_session re-checks access)
-// 4. dispatch the LiveKit agent "eduroam-tutor" with ONLY the opaque pairing id as metadata
+// 4. dispatch the configured agent: the hosted Agent Builder agent "eduroam-tutor" gets JSON metadata
+//    with its six registered fields (npc_name, subject, personality, teaching_style, coursework,
+//    learning_memory) built from THIS student's RLS-scoped data; the self-hosted Python worker
+//    (VOICE_AGENT_NAME=eduroam-tutor-code) keeps the opaque pairing id it resolves at voice-agent
 // 5. return a join-only token for that one room (LiveKit secrets never leave the server)
 
 import { AccessToken, AgentDispatchClient, RoomServiceClient } from 'npm:livekit-server-sdk@2.19.2';
 import { adminClient, authenticate, HttpError, json, rateLimit, readJson, serve } from '../_shared/http.ts';
-import { resolveNpcIdentity } from '../_shared/npcContext.ts';
+import { loadBuilderMetadata, resolveNpcIdentity } from '../_shared/npcContext.ts';
 import {
     FACETIME_CODE_TTL_SECONDS, hashPairingCode, JOIN_TOKEN_TTL, livekitHttpUrl, newPairingCode, PAIRING_TTL_SECONDS, parseVoiceStart, voiceAgentName,
+    usesBuilderMetadata,
 } from '../_shared/voice.ts';
 
 serve(async (req) =>
@@ -61,6 +65,15 @@ serve(async (req) =>
     const apiSecret = Deno.env.get('LIVEKIT_API_SECRET');
     if (!url || !apiKey || !apiSecret) throw new HttpError(503, 'voice_not_configured', 'FaceTime Tutor is not set up yet.');
 
+    const agentName = voiceAgentName(Deno.env.get('VOICE_AGENT_NAME'));
+    let builder: string | null = null;
+    if (usesBuilderMetadata(agentName))
+    {
+        // The student's own (RLS-scoped) client: only this student's memory and private uploads,
+        // only material of this NPC's class.
+        builder = JSON.stringify(await loadBuilderMetadata(db, userId, npc));
+    }
+
     const { data, error } = await admin.rpc('create_voice_session', { p_player_id: userId, p_npc_id: npc.id, p_ttl_seconds: PAIRING_TTL_SECONDS });
     if (error)
     {
@@ -72,9 +85,9 @@ serve(async (req) =>
 
     try
     {
-        // Explicit dispatch also creates the room. The metadata is the pairing id and nothing else.
+        // Explicit dispatch also creates the room. Builder: the six JSON fields; Python worker: the pairing id only.
         await new AgentDispatchClient(livekitHttpUrl(url), apiKey, apiSecret)
-            .createDispatch(session.room_name, voiceAgentName(Deno.env.get('VOICE_AGENT_NAME')), { metadata: session.id });
+            .createDispatch(session.room_name, agentName, { metadata: builder ?? session.id });
     }
     catch (err)
     {

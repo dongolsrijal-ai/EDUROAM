@@ -361,3 +361,18 @@ and chert-webhook. A permanent LiveKit Cloud deployment needs the slot: delete t
 **Tests (mocked Supabase, no email sent).** Browser phases `gate-code`, `gate-reset`, `gate-reset-reload`,
 `gate-reset-login`, `gate-link`, `gate-link-expired`; unit tests in `tests/authFlow.test.mts`.
 `EDUROAM_PHASES=gate-code node tests/browserAuth.mjs` runs selected phases.
+
+## Agent Builder metadata for in-game calls (2026-11-15)
+
+voice-session now dispatches the hosted Builder agent `eduroam-tutor` with JSON metadata holding its six
+registered fields: `npc_name`, `subject`, `personality`, `teaching_style`, `coursework` and `learning_memory`.
+- The values come from `loadBuilderMetadata` (npcContext.ts), using the student's own RLS-scoped client:
+  resolveNpcIdentity, then retrieveStudentMemory, then loadClassKnowledge.
+- Each field is capped; the whole JSON stays under 6 KB. No ids or tokens are included.
+- If the Supabase secret `VOICE_AGENT_NAME` is set to anything else (e.g. `eduroam-tutor-code`), the old
+  opaque pairing id is sent for the Python worker instead.
+- The Builder agent never claims the pairing, so voice-agent search and the end-of-call memory save are
+  not used on Builder calls.
+- Deployed as voice-session v16: a single esbuild bundle of the function and its `_shared` modules,
+  with the `npm:` imports kept external.
+- Tests: `supabase/functions/tests/voice_builder_test.ts` (`npm run test:edge`).
