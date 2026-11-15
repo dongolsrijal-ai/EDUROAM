@@ -704,3 +704,45 @@ test('assignments + study tasks: owner-only, class/NPC/document access re-checke
     await rows(STUDENT, `update public.players set timezone = 'Europe/Berlin' where id = $1`, [STUDENT]);
     assert.equal((await rows<{ timezone: string }>(STUDENT, 'select timezone from public.players where id = $1', [STUDENT]))[0].timezone, 'Europe/Berlin');
 });
+
+test('deleting a document, an NPC (permanent deletion) or a class never fails because of student assignments', async () =>
+{
+    const owner = crypto.randomUUID();
+    const cls = crypto.randomUUID();
+    const npc = crypto.randomUUID();
+    const doc = crypto.randomUUID();
+    await db.query('insert into auth.users(id) values ($1)', [owner]);
+    await as(owner, async (tx) =>
+    {
+        await tx.query("insert into public.classes(id,owner_id,name,subject) values ($1,$2,'Cleanup test','Math')", [cls, owner]);
+        await tx.query("insert into public.npcs(id,owner_id,class_id,game_npc_id,name,appearance,subject) values ($1,$2,$3,'cleanup_npc','Teacher','scientist','Math')", [npc, owner, cls]);
+    });
+    await as('service', (tx) => tx.query("insert into public.class_documents(id,class_id,npc_id,uploaded_by,title,file_path,file_type,mime_type,size_bytes,visibility,processing_status) values ($1,$2,$3,$4,'Syllabus',$5,'pdf','application/pdf',10,'class','ready')",
+        [doc, cls, npc, owner, `${owner}/${doc}/s.pdf`]));
+    const work = (await rows<{ id: string }>(owner, "insert into public.assignments (player_id, class_id, npc_id, source_document_id, title) values ($1, $2, $3, $4, 'Homework') returning id", [owner, cls, npc, doc]))[0].id;
+    await rows(owner, "insert into public.study_tasks (player_id, assignment_id, npc_id, title) values ($1, $2, $3, 'Practice')", [owner, work, npc]);
+
+    await as('service', (tx) => tx.query('DELETE FROM public.class_documents WHERE id = $1', [doc]));
+    await rows('service', 'select public.prepare_npc_deletion($1,$2)', [owner, npc]);
+    await rows('service', 'select public.finish_npc_deletion($1,$2)', [owner, npc]);
+    await as(owner, (tx) => tx.query('DELETE FROM public.classes WHERE id = $1', [cls]));
+
+    const left = await rows<{ class_id: string | null; npc_id: string | null; source_document_id: string | null; title: string }>(owner,
+        'select class_id, npc_id, source_document_id, title from public.assignments where id = $1', [work]);
+    assert.deepEqual(left, [{ class_id: null, npc_id: null, source_document_id: null, title: 'Homework' }], 'the student keeps their work; references cleared');
+    const task = await rows<{ class_id: string | null; npc_id: string | null }>(owner, 'select class_id, npc_id from public.study_tasks where assignment_id = $1', [work]);
+    assert.deepEqual(task, [{ class_id: null, npc_id: null }]);
+    // Clearing is allowed; pointing at something new is still checked.
+    await assert.rejects(rows(owner, 'update public.assignments set class_id = $2 where id = $1', [work, HIST_CLASS]), /class not accessible/);
+
+    // A class deleted with its class-wide documents (no NPCs left): class + document references
+    // are cleared by two cascades in one statement.
+    const cls2 = crypto.randomUUID();
+    const doc2 = crypto.randomUUID();
+    await as(owner, (tx) => tx.query("insert into public.classes(id,owner_id,name,subject) values ($1,$2,'Cleanup test 2','Math')", [cls2, owner]));
+    await as('service', (tx) => tx.query("insert into public.class_documents(id,class_id,npc_id,uploaded_by,title,file_path,file_type,mime_type,size_bytes,visibility,processing_status) values ($1,$2,null,$3,'Rubric',$4,'pdf','application/pdf',10,'class','ready')",
+        [doc2, cls2, owner, `${owner}/${doc2}/r.pdf`]));
+    const work2 = (await rows<{ id: string }>(owner, "insert into public.assignments (player_id, class_id, source_document_id, title) values ($1, $2, $3, 'Essay') returning id", [owner, cls2, doc2]))[0].id;
+    await as(owner, (tx) => tx.query('DELETE FROM public.classes WHERE id = $1', [cls2]));
+    assert.deepEqual(await rows(owner, 'select class_id, source_document_id from public.assignments where id = $1', [work2]), [{ class_id: null, source_document_id: null }]);
+});

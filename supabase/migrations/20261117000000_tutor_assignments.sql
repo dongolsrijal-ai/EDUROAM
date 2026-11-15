@@ -66,12 +66,14 @@ declare
     v_new jsonb := to_jsonb(new);
     v_old jsonb := case when tg_op = 'UPDATE' then to_jsonb(old) else null end;
 begin
-    -- Status / text / date edits keep working even if the student later left the class.
+    -- Updates that point at nothing new pass: status / text / date edits (even after the student
+    -- left the class) and references being cleared, e.g. ON DELETE SET NULL when a teacher deletes
+    -- a class, NPC or document (that cleanup must never be blocked by this check).
     if tg_op = 'UPDATE' and new.player_id = old.player_id
-        and (v_new -> 'class_id') is not distinct from (v_old -> 'class_id')
-        and (v_new -> 'npc_id') is not distinct from (v_old -> 'npc_id')
-        and (v_new -> 'assignment_id') is not distinct from (v_old -> 'assignment_id')
-        and (v_new -> 'source_document_id') is not distinct from (v_old -> 'source_document_id')
+        and ((v_new -> 'class_id') is not distinct from (v_old -> 'class_id') or new.class_id is null)
+        and ((v_new -> 'npc_id') is not distinct from (v_old -> 'npc_id') or new.npc_id is null)
+        and ((v_new -> 'assignment_id') is not distinct from (v_old -> 'assignment_id') or (v_new ->> 'assignment_id') is null)
+        and ((v_new -> 'source_document_id') is not distinct from (v_old -> 'source_document_id') or (v_new ->> 'source_document_id') is null)
     then
         return new;
     end if;
