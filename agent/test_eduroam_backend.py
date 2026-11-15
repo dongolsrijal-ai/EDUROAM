@@ -81,7 +81,7 @@ class InstructionTests(unittest.TestCase):
         self.assertEqual(state.teacher, "Professor Maple")
         text = paired_instructions(state)
         self.assertIn("You are Professor Maple", text)
-        self.assertIn("analyze_camera: call before describing anything you see", text)
+        self.assertIn("this call DOES support live video", text)
         # Static for the whole call (Gemini Live would append any update as a model turn).
         state.camera_on = True
         self.assertEqual(paired_instructions(state), text)

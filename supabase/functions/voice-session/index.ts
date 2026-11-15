@@ -29,8 +29,9 @@ serve(async (req) =>
     const parsed = parseVoiceStart(await readJson(req));
     if (!parsed.ok) throw new HttpError(400, 'bad_request', parsed.error);
 
-    await rateLimit(admin, userId, 'voice:minute', 3, 60);
-    await rateLimit(admin, userId, 'voice:day', 30, 86_400);
+    // Generous enough for retries while testing (FaceTime codes + in-game calls share it).
+    await rateLimit(admin, userId, 'voice:minute', 8, 60);
+    await rateLimit(admin, userId, 'voice:day', 80, 86_400);
     // RLS-scoped lookup: only an NPC this student may use is found at all.
     const npc = await resolveNpcIdentity(db, userId, parsed.value.npcId);
     // The student's timezone, for deadlines spoken in local time (best effort; never blocks a call).

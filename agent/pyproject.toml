@@ -4,6 +4,6 @@ version = "0.1.0"
 description = "EDUROAM's single LiveKit agent (eduroam-tutor): Gemini Live voice + camera, one agent for every teacher."
 requires-python = ">=3.10"
 dependencies = [
-    "livekit-agents[google]~=1.8",
+    "livekit-agents[google,images]~=1.8",
     "python-dotenv>=1.0",
 ]

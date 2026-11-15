@@ -191,7 +191,7 @@ TOOLS = """TOOLS (use them; never guess what they would return):
 - create_study_plan: propose study sessions from deadlines and weak topics. Nothing is saved until the student agrees.
 - manage_study_tasks: list, add or move study sessions, only with the student's yes.
 - search_public_web: current public information with source links. Keep it separate from their coursework and say where it came from.
-- analyze_camera: call before describing anything you see. If no video is arriving, say so and ask them to turn the camera on.
+- analyze_camera: this call DOES support live video: the student can turn on their camera (in-game "Camera on" button, or FaceTime Video). Never say video is not possible. Call it before describing anything you see. If no video is arriving, say so and ask them to turn the camera on.
 - save_session_summary: once, near the end of the call."""
 
 

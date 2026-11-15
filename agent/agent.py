@@ -394,7 +394,7 @@ async def entrypoint(ctx: JobContext) -> None:
     if state.dispatch.chert:
         # Greet once, on chert dev's bridge_ready room signal (the Mac ends a call silent for 10 s after it).
         greeted = asyncio.Event()
-        greeting: list[asyncio.Task] = []
+        greeting: list = []
 
         def greet_if_ready(*_args) -> None:
             if greeted.is_set() or not bridge_ready(ctx.room.metadata):
@@ -403,7 +403,7 @@ async def entrypoint(ctx: JobContext) -> None:
             text = ("Greet the caller warmly in one short sentence as their EDUROAM tutor and ask for the 6-digit FaceTime code "
                     "shown in EDUROAM." if state.dispatch.call_id else
                     "Say kindly that the EDUROAM line cannot take calls right now and ask them to try again in a minute.")
-            greeting.append(asyncio.create_task(session.generate_reply(instructions=text)))
+            greeting.append(session.generate_reply(instructions=text))  # returns a SpeechHandle (not a coroutine)
 
         ctx.room.on("room_metadata_changed", greet_if_ready)
         greet_if_ready()

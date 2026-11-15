@@ -1,2 +1,2 @@
-livekit-agents[google]==1.8.12
+livekit-agents[google,images]==1.8.12
 python-dotenv>=1.0,<2
